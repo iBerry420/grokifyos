@@ -1,0 +1,155 @@
+name: Build GrokifyOS Android APKs
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_base:
+        description: "API base URL (leave default unless you use another server)"
+        required: false
+        default: "https://grokifyos.grokpot.io/api"
+      ws_url:
+        description: "WebSocket URL"
+        required: false
+        default: "wss://grokifyos.grokpot.io/grokify-ws/"
+      site_url:
+        description: "GrokifyOS site URL"
+        required: false
+        default: "https://grokifyos.grokpot.io"
+      build_type:
+        description: "Android build type"
+        required: false
+        type: choice
+        options:
+          - debug
+          - release
+        default: debug
+  push:
+    branches: ["main"]
+    paths:
+      - "android/**"
+      - ".github/workflows/build-android.yml"
+  pull_request:
+    paths:
+      - "android/**"
+      - ".github/workflows/build-android.yml"
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Android APKs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    env:
+      API_BASE: ${{ inputs.api_base || 'https://grokifyos.grokpot.io/api' }}
+      WS_URL: ${{ inputs.ws_url || 'wss://grokifyos.grokpot.io/grokify-ws/' }}
+      SITE_URL: ${{ inputs.site_url || 'https://grokifyos.grokpot.io' }}
+      BUILD_TYPE: ${{ inputs.build_type || 'debug' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 35 + build tools
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Make Gradle executable
+        working-directory: android
+        run: chmod +x ./gradlew
+
+      - name: Configure server endpoints
+        working-directory: android
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, re
+
+          p = Path("app/build.gradle.kts")
+          s = p.read_text()
+
+          replacements = {
+              "API_BASE": os.environ["API_BASE"],
+              "WS_URL": os.environ["WS_URL"],
+              "SITE_URL": os.environ["SITE_URL"],
+          }
+
+          for key, value in replacements.items():
+              pattern = rf'(buildConfigField\("String",\s*"{key}",\s*)".*?"\)'
+              replacement = rf'\1"{value}"'
+              s, n = re.subn(pattern, replacement, s)
+              if n != 1:
+                  raise SystemExit(f"Could not replace {key}: matched {n} times")
+
+          p.write_text(s)
+          PY
+
+          grep -n 'buildConfigField' app/build.gradle.kts
+
+      - name: Validate Gradle project
+        working-directory: android
+        run: ./gradlew --version
+
+      - name: Build phone APK
+        working-directory: android
+        run: ./gradlew :app:assemble${BUILD_TYPE^} --stacktrace --no-daemon
+
+      - name: Build Wear OS APK
+        working-directory: android
+        run: ./gradlew :wear:assemble${BUILD_TYPE^} --stacktrace --no-daemon
+
+      - name: Build Wear OS watch face
+        working-directory: android
+        run: ./gradlew :wear-face:assemble${BUILD_TYPE^} --stacktrace --no-daemon
+
+      - name: Collect APKs
+        run: |
+          set -e
+          mkdir -p dist
+          find android -type f -path "*/build/outputs/apk/*.apk" -print -exec cp {} dist/ \;
+          test -n "$(find dist -name '*.apk' -print -quit)"
+          ls -lh dist
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum *.apk > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: grokifyos-android-${{ github.sha }}
+          path: |
+            dist/*.apk
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create GitHub Release assets
+        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.apk
+            dist/SHA256SUMS.txt
+          fail_on_unmatched_files: true
