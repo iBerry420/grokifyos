@@ -91,6 +91,7 @@ import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.LinkOff
 import io.grokify.os.apps.BluetoothScannerPane
+import io.grokify.os.apps.CexBotPane
 import io.grokify.os.apps.GrokAssistantPane
 import io.grokify.os.apps.LocationNotesPane
 import io.grokify.os.apps.SpaceXaiUsageAnalyzerPane
@@ -4678,6 +4679,9 @@ private fun AppsPane(
         BuiltinPluginCatalog.WATCH_DEPLOY, "watch_deploy" -> io.grokify.os.apps.watchdeploy.WatchDeployPane(
             onBack = onBackToHub,
         )
+        BuiltinPluginCatalog.CEXBOT, "cexbot" -> CexBotPane(
+            onBack = onBackToHub,
+        )
         else -> AppsHub(
             appOrder = appOrder,
             onOpenApp = onOpenApp,
@@ -4910,6 +4914,7 @@ private fun appsNavShortTitle(app: PluginManifest): String = when (app.id) {
     BuiltinPluginCatalog.GROK_ASSISTANT -> "Assistant"
     BuiltinPluginCatalog.COMPANION -> "Companion"
     BuiltinPluginCatalog.WATCH_DEPLOY -> "Watch"
+    BuiltinPluginCatalog.CEXBOT -> "CexBot"
     else -> app.title.take(12)
 }
 

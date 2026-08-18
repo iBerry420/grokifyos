@@ -13,6 +13,7 @@ object BuiltinPluginCatalog {
     const val GROK_ASSISTANT = "grok_assistant"
     const val COMPANION = "companion"
     const val WATCH_DEPLOY = "watch_deploy"
+    const val CEXBOT = "cexbot"
 
     val all: List<PluginManifest> = listOf(
         PluginManifest(
@@ -155,6 +156,19 @@ object BuiltinPluginCatalog {
             capabilities = listOf("Wear OS", "OTA", "ADB", "Developer"),
             accent = PluginAccent.Cyan,
             icon = PluginIconKey.Watch,
+            featured = true,
+        ),
+        PluginManifest(
+            id = CEXBOT,
+            title = "CexBot",
+            subtitle = "Trade desk + GrokifyOS chat at cexbot.grokpot.io",
+            version = "1.0.0",
+            source = PluginSource.Builtin,
+            kind = PluginKind.HostModule,
+            hostModuleId = CEXBOT,
+            capabilities = listOf("Trading", "AI"),
+            accent = PluginAccent.Amber,
+            icon = PluginIconKey.Chart,
             featured = true,
         ),
     )
