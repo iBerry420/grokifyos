@@ -111,7 +111,6 @@ fun CexBotPane(
                     )
                     setBackgroundColor(AndroidColor.parseColor("#05060A"))
                     overScrollMode = WebView.OVER_SCROLL_NEVER
-                    setInitialScale(100)
                     // Default layer type — HARDWARE blanks WebView surfaces on some OEMs.
                     CookieManager.getInstance().setAcceptCookie(true)
                     CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
@@ -123,11 +122,15 @@ fun CexBotPane(
                         mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                         cacheMode = WebSettings.LOAD_DEFAULT
                         mediaPlaybackRequiresUserGesture = true
-                        useWideViewPort = false
+                        // Honor width=device-width. Do not setInitialScale(100) — that is
+                        // 1 CSS px = 1 screen px on xxhdpi, so the desk draws ~3× too small.
+                        useWideViewPort = true
                         loadWithOverviewMode = false
+                        textZoom = 100
+                        // Zoom must stay enabled or Chromium ignores viewport initial-scale.
+                        setSupportZoom(true)
                         builtInZoomControls = false
                         displayZoomControls = false
-                        setSupportZoom(false)
                         userAgentString =
                             "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
                         @Suppress("DEPRECATION")
