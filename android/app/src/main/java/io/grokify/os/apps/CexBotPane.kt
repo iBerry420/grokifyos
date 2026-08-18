@@ -111,6 +111,7 @@ fun CexBotPane(
                     )
                     setBackgroundColor(AndroidColor.parseColor("#05060A"))
                     overScrollMode = WebView.OVER_SCROLL_NEVER
+                    setInitialScale(100)
                     // Default layer type — HARDWARE blanks WebView surfaces on some OEMs.
                     CookieManager.getInstance().setAcceptCookie(true)
                     CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
@@ -122,7 +123,7 @@ fun CexBotPane(
                         mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                         cacheMode = WebSettings.LOAD_DEFAULT
                         mediaPlaybackRequiresUserGesture = true
-                        useWideViewPort = true
+                        useWideViewPort = false
                         loadWithOverviewMode = false
                         builtInZoomControls = false
                         displayZoomControls = false
