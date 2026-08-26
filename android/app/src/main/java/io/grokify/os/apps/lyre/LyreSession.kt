@@ -248,7 +248,8 @@ class LyreSession(
                             id,
                             LyrePendingOp(0, "storage_put", key = compiled, localPath = cache.objectRel(id, compiled)),
                         )
-                        queuePublish(id, vis, compiled, if (cache.online()) "storage_put_failed" else "offline")
+                        // Do not enqueue/run publish until this compiled put is ok (PHP copies grokme).
+                        _watchError.value = if (cache.online()) "storage_put_failed" else "offline"
                         return
                     }
                 } else if (cache.online()) {
@@ -282,8 +283,12 @@ class LyreSession(
             id,
             LyrePendingOp(0, "publish", key = compiled, visibility = vis),
         )
-        if (cache.online()) flushPending(id)
-        if (_project.value?.visibility != vis) {
+        if (cache.online()) {
+            flushPending(id)
+            if (cache.listPending(id).any { it.second.type == "publish" && it.second.visibility == vis }) {
+                _watchError.value = error
+            }
+        } else {
             _watchError.value = error
         }
     }
@@ -775,10 +780,29 @@ class LyreSession(
         flushMutex.withLock {
             val ops = cache.listPending(boardId)
             val latestSave = ops.filter { it.second.type == "save_board" }.maxOfOrNull { it.second.seq }
-            for ((file, op) in ops) {
+            val pendingPutCount = mutableMapOf<String, Int>()
+            for ((_, op) in ops) {
+                if (op.type != "storage_put") continue
+                val k = op.key ?: continue
+                pendingPutCount[k] = (pendingPutCount[k] ?: 0) + 1
+            }
+            val failedPutsThisSweep = mutableSetOf<String>()
+            fun isPublicPublish(op: LyrePendingOp): Boolean {
+                if (op.type != "publish") return false
+                return (op.visibility?.takeIf { it == "public" || it == "private" } ?: "public") == "public"
+            }
+            // Public publish copies grokme; run compiled puts first, then skip if put pending/failed.
+            val ordered = ops.filterNot { isPublicPublish(it.second) } + ops.filter { isPublicPublish(it.second) }
+            for ((file, op) in ordered) {
                 if (op.type == "save_board" && latestSave != null && op.seq != latestSave) {
                     cache.deletePending(file)
                     continue
+                }
+                if (isPublicPublish(op)) {
+                    val k = op.key
+                    if (k != null && ((pendingPutCount[k] ?: 0) > 0 || k in failedPutsThisSweep)) {
+                        continue
+                    }
                 }
                 val ok = runCatching {
                     when (op.type) {
@@ -811,10 +835,19 @@ class LyreSession(
                 }.getOrDefault(false)
                 if (ok) {
                     cache.deletePending(file)
+                    if (op.type == "storage_put") {
+                        op.key?.let { k -> pendingPutCount[k] = (pendingPutCount[k] ?: 1) - 1 }
+                    }
                 } else {
+                    if (op.type == "storage_put") {
+                        op.key?.let { failedPutsThisSweep.add(it) }
+                    }
                     val fails = op.failCount + 1
                     if (fails >= 5) {
                         cache.deletePending(file)
+                        if (op.type == "storage_put") {
+                            op.key?.let { k -> pendingPutCount[k] = (pendingPutCount[k] ?: 1) - 1 }
+                        }
                         activity(boardId, "pending_drop", "dropped ${op.type} after 5 failures", null, null, op.key)
                     } else {
                         cache.writePending(boardId, op.copy(failCount = fails))
