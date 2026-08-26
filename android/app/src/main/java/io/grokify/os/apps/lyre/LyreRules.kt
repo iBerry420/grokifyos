@@ -268,7 +268,7 @@ object LyreRules {
         val images = scene.frames.mapIndexed { i, frame -> frameToBin(frame, scene, i) }
         val dropped = scene.frames.map { it.id }.toSet()
         val remaining = board.scenes.filterIndexed { i, _ -> i != index }
-        val scenes = remaining.ifEmpty { listOf(emptyScene()) }
+        val scenes = remaining.ifEmpty { listOf(scene.copy(frames = emptyList())) }
         val active = when {
             board.activeSceneId != sceneId -> board.activeSceneId
             else -> scenes.first().id

@@ -75,6 +75,15 @@ class LyreClipMovieTest {
         assertEquals(2, stitched.videoLayers[0].clips.size)
         assertTrue(stitched.videoLayers[0].clips.any { it.id == "lc_a" })
         assertTrue(stitched.videoLayers[0].clips.any { it.id == "lc_b" })
+
+        val compiledEmptyParts = board.copy(movie = board.movie!!.copy(parts = emptyList()))
+        assertFalse(LyreMovie.clipInMovie(compiledEmptyParts.movie, "lc_a", compiledEmptyParts.videoLayers))
+        assertFalse(LyreMovie.clipInMovie(compiledEmptyParts.movie, "lc_b", compiledEmptyParts.videoLayers))
+        val emptyPartsProgram = LyreMovie.movieProgramLayers(
+            compiledEmptyParts.movie,
+            compiledEmptyParts.videoLayers,
+        )
+        assertEquals(listOf("lc_movie", "lc_a", "lc_b"), emptyPartsProgram[0].clips.map { it.id })
     }
 
     @Test

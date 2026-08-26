@@ -159,6 +159,8 @@ object LyreMovie {
 
     private fun movieMemberIds(live: BoardMovie, layers: List<MediaLayer>): Set<String> {
         if (live.parts.isNotEmpty()) return live.parts.map { it.clipId }.toSet()
+        // clipInMovie: nonempty src + empty parts → no members (not implicit first clip).
+        if (live.src.isNotEmpty()) return emptySet()
         val first = orderedVideoClips(layers).firstOrNull()
         return if (first != null) setOf(first.id) else emptySet()
     }

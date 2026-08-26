@@ -14,7 +14,7 @@ data class LyreActivityLine(
     val clipId: String?,
 )
 
-/** Infinite JSONL reader. Session appends via [LyreCache.appendActivity]. */
+/** JSONL tail: last 1 MiB, skip a partial first line. */
 object LyreActivity {
     private const val TAIL_BYTES = 1_048_576L
 

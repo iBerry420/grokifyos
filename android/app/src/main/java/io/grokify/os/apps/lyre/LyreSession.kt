@@ -1105,8 +1105,19 @@ class LyreSession(
                 val role = if (msg.role == "user") "user" else "muse"
                 arr.put(JSONObject().put("role", role).put("text", msg.text))
             }
-            val nextUi = JSONObject(ui.toString()).put("museMessages", arr)
-            commit(boardId, board.copy(ui = nextUi))
+            // Chrome transcript only — do not bump boardEpoch (in-flight apply() would drop).
+            ui.put("museMessages", arr)
+            val data = LyreBoardCodec.encode(board)
+            cache.writeBoardJson(boardId, data)
+            enqueuePendingFor(
+                boardId,
+                LyrePendingOp(
+                    seq = 0,
+                    type = "save_board",
+                    createdAtMs = System.currentTimeMillis(),
+                ),
+                snapshotJson = data,
+            )
         }
     }
 

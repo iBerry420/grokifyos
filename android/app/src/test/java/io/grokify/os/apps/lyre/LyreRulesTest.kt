@@ -484,8 +484,12 @@ class LyreRulesTest {
 
         val dumped = LyreRules.dumpScene(unstitched, "sc_1")
         assertEquals(1, dumped.board.scenes.size)
+        assertEquals("sc_1", dumped.board.scenes[0].id)
+        assertEquals("Scene 1", dumped.board.scenes[0].title)
         assertTrue(dumped.board.scenes[0].frames.isEmpty())
         assertTrue(dumped.board.videoLayers.flatMap { it.clips }.isEmpty())
+        assertTrue(dumped.board.movie?.parts.isNullOrEmpty())
+        assertEquals("boards/lyre/clips/lc_a.mp4", dumped.board.movie?.src)
         val bin = dumped.board.refFolders.flatMap { it.images }
         assertTrue(bin.any { it.fromFrameId == "fr_b" && it.fromSceneId == "sc_1" })
         val dumpedBeat = bin.first { it.id == "fr_b" }
@@ -498,8 +502,28 @@ class LyreRulesTest {
         assertEquals(restored.videoSrc, restoredClip.src)
         assertEquals(dumpedBeat.videoSrc, restored.videoSrc)
         assertFalse(LyreMovie.frameInMovie(recycled.board.movie, recycled.board.videoLayers, restored.id))
+        val programIds = LyreMovie.movieProgramLayers(recycled.board.movie, recycled.board.videoLayers)
+            .flatMap { it.clips }
+            .map { it.id }
+        assertEquals(listOf("lc_movie", restoredClip.id), programIds)
         assertDualWrite(recycled.board)
         assertTrue(recycled.board.refFolders.flatMap { it.images }.none { it.id == dumpedBeat.id })
+
+        val noted = unstitched.copy(
+            scenes = unstitched.scenes.map { it.copy(title = "Prologue", notes = "keep") },
+        )
+        val dumpedNoted = LyreRules.dumpScene(noted, "sc_1")
+        assertEquals("sc_1", dumpedNoted.board.scenes.single().id)
+        assertEquals("Prologue", dumpedNoted.board.scenes.single().title)
+        assertEquals("keep", dumpedNoted.board.scenes.single().notes)
+        assertTrue(dumpedNoted.board.scenes.single().frames.isEmpty())
+
+        val extraScene = LyreRules.addScene(unstitched).board
+        val dumpedOriginal = LyreRules.dumpScene(extraScene, "sc_1")
+        val leftoverScene = dumpedOriginal.board.scenes.single()
+        val dumpedLeftoverScene = LyreRules.dumpScene(dumpedOriginal.board, leftoverScene.id)
+        assertEquals(leftoverScene.id, dumpedLeftoverScene.board.scenes.single().id)
+        assertEquals(leftoverScene.title, dumpedLeftoverScene.board.scenes.single().title)
 
         val withLib = unstitched.copy(
             refFolders = listOf(RefFolder(id = "lib", name = "Library", images = listOf(still))),
