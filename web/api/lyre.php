@@ -334,6 +334,84 @@ function gos_lyre_json_error(string $error, int $code): never
     gos_api_json(['ok' => false, 'error' => $error], $code);
 }
 
+function gos_lyre_storage_put(string $rawKey): never
+{
+    $key = gos_lyre_storage_key($rawKey);
+    if ($key === null) {
+        gos_lyre_json_error('invalid_key', 400);
+    }
+    $base = rtrim((string) (gos_env('GROKIFY_LYRE_ME_STORAGE_BASE', 'https://me.grokpot.io/v1/storage') ?? ''), '/');
+    $apiKey = (string) (gos_env('GROKIFY_LYRE_ME_API_KEY', '') ?? '');
+    if ($base === '' || $apiKey === '') {
+        gos_lyre_json_error('lyre_storage_unconfigured', 503);
+    }
+    if (!function_exists('curl_init')) {
+        gos_lyre_json_error('curl_missing', 500);
+    }
+    $tmp = tmpfile();
+    $in = fopen('php://input', 'rb');
+    if ($tmp === false || $in === false) {
+        gos_lyre_json_error('storage_put_spool', 500);
+    }
+    stream_copy_to_stream($in, $tmp);
+    fclose($in);
+    rewind($tmp);
+    $stat = fstat($tmp);
+    $size = (int) ($stat['size'] ?? 0);
+    if ($size <= 0) {
+        fclose($tmp);
+        gos_lyre_json_error('empty_body', 400);
+    }
+    $url = $base . '/' . implode('/', array_map('rawurlencode', explode('/', $key)));
+    $ch = curl_init($url);
+    if ($ch === false) {
+        fclose($tmp);
+        gos_lyre_json_error('storage_put_failed', 502);
+    }
+    $ctype = (string) ($_SERVER['CONTENT_TYPE'] ?? 'application/octet-stream');
+    if ($ctype === '') {
+        $ctype = 'application/octet-stream';
+    }
+    curl_setopt_array($ch, [
+        CURLOPT_CUSTOMREQUEST => 'POST',
+        CURLOPT_UPLOAD => true,
+        CURLOPT_INFILE => $tmp,
+        CURLOPT_INFILESIZE => $size,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_CONNECTTIMEOUT => 30,
+        CURLOPT_TIMEOUT => 300, // Apache Timeout 300 caps the hop
+        CURLOPT_HTTPHEADER => [
+            'Authorization: Bearer ' . $apiKey,
+            'Content-Type: ' . $ctype,
+            'Content-Length: ' . (string) $size,
+        ],
+    ]);
+    $raw = curl_exec($ch);
+    $errno = curl_errno($ch);
+    $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    fclose($tmp);
+    if ($errno === 28) {
+        gos_lyre_json_error('storage_put_timeout', 504);
+    }
+    if ($raw === false || $errno !== 0) {
+        gos_lyre_json_error('storage_put_failed', 502);
+    }
+    if ($status === 504) {
+        gos_lyre_json_error('storage_put_timeout', 504);
+    }
+    if ($status < 200 || $status >= 300) {
+        gos_lyre_json_error('storage_put_failed', $status >= 400 ? $status : 502);
+    }
+    $json = json_decode(is_string($raw) ? $raw : '', true);
+    if (!is_array($json)) {
+        $json = ['ok' => true, 'key' => $key, 'bytes' => $size];
+    }
+    $json['ok'] = true;
+    gos_api_json($json);
+}
+
 function gos_lyre_storage_get(string $rawKey): never
 {
     $key = gos_lyre_storage_key($rawKey);
@@ -603,7 +681,7 @@ if ($httpMethod === 'GET' && $qsAction === 'storage_get') {
 }
 if ($httpMethod === 'POST' && $qsAction === 'storage_put') {
     gos_lyre_auth();
-    gos_api_json(['ok' => false, 'error' => 'not_implemented'], 501);
+    gos_lyre_storage_put((string) ($_GET['key'] ?? ''));
 }
 if ($httpMethod === 'GET') {
     $access = gos_lyre_auth();

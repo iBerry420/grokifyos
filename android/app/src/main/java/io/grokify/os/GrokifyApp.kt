@@ -9,6 +9,7 @@ import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
+import io.grokify.os.apps.lyre.LyreSession
 import io.grokify.os.data.TokenStore
 import io.grokify.os.wearbridge.WearApiKeySync
 import kotlinx.coroutines.CoroutineScope
@@ -18,6 +19,8 @@ import kotlinx.coroutines.SupervisorJob
 class GrokifyApp : Application(), ImageLoaderFactory {
     lateinit var tokenStore: TokenStore
         private set
+
+    val lyreSession: LyreSession by lazy { LyreSession(this) }
 
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -160,6 +163,19 @@ class GrokifyApp : Application(), ImageLoaderFactory {
                 lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             }
         )
+        nm.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_LYRE,
+                getString(R.string.notification_channel_lyre),
+                NotificationManager.IMPORTANCE_LOW,
+            ).apply {
+                description = getString(R.string.notification_channel_lyre_desc)
+                setShowBadge(false)
+                setSound(null, null)
+                enableVibration(false)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            }
+        )
         // Re-arm lockscreen Spotify controller after process start
         runCatching {
             if (io.grokify.os.apps.SpotifyControllerStore(this).enabled) {
@@ -203,6 +219,7 @@ class GrokifyApp : Application(), ImageLoaderFactory {
         const val CHANNEL_SPOTIFY_DJ = "grokify_spotify_dj"
         const val CHANNEL_SPACEXAI_USAGE = "grokify_spacexai_usage"
         const val CHANNEL_GBOT = "grokify_gbot"
+        const val CHANNEL_LYRE = "grokify_lyre"
 
         lateinit var instance: GrokifyApp
             private set

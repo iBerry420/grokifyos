@@ -421,7 +421,7 @@ object LyreRules {
         }
     }
 
-    private fun retimeLinkedClips(board: BoardData): BoardData {
+    internal fun retimeLinkedClips(board: BoardData): BoardData {
         val startByFrame = LyreClip.movieClips(board.scenes).associate { it.frame.id to it.start }
         return board.copy(
             videoLayers = board.videoLayers.map { layer ->

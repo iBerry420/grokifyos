@@ -1,5 +1,6 @@
 package io.grokify.os.apps.lyre
 
+import android.app.Application
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -16,7 +17,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -27,15 +30,16 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import io.grokify.os.GrokifyApp
 import io.grokify.os.apps.lyre.ui.LyreEditor
 import io.grokify.os.apps.plugin.BuiltinPluginCatalog
 import io.grokify.os.apps.plugin.PluginFaviconImage
 import io.grokify.os.apps.plugin.PluginIconKey
-import io.grokify.os.data.TokenStore
 import io.grokify.os.ui.theme.GrokifyColors
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
@@ -47,29 +51,43 @@ fun LyrePane(
     val context = LocalContext.current
     val appCtx = context.applicationContext
     val store = remember { LyreStore(appCtx) }
-    val tokenStore = remember {
-        if (appCtx is GrokifyApp) appCtx.tokenStore else TokenStore(appCtx)
+    val session = remember {
+        (appCtx as? GrokifyApp)?.lyreSession ?: LyreSession(appCtx as Application)
     }
-    val api = remember {
-        LyreApi {
-            kotlinx.coroutines.runBlocking {
-                tokenStore.tokenFlow.first()
-            }
-        }
-    }
-    val cache = remember { LyreCache(appCtx, api) }
+    val board by session.board.collectAsState()
+    val boardId by session.boundBoardId.collectAsState()
+    val busy by session.busy.collectAsState()
 
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
-    var board by remember { mutableStateOf<BoardData?>(null) }
-    var boardId by remember { mutableStateOf<String?>(null) }
 
-    BackHandler(onBack = onBack)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, session) {
+        val obs = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) session.flushSave()
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(obs)
+            session.flushSave()
+        }
+    }
+
+    fun goBack() {
+        session.flushSave()
+        onBack()
+    }
+
+    BackHandler(onBack = { goBack() })
     LaunchedEffect(Unit) {
         onRequestPermissions()
+        if (busy != null && board != null) {
+            loading = false
+            return@LaunchedEffect
+        }
         val result = withContext(Dispatchers.IO) {
             runCatching {
-                val projectsJson = api.projects()
+                val projectsJson = session.api.projects()
                 if (!projectsJson.optBoolean("ok", false)) {
                     return@runCatching LoadResult(
                         error = projectsJson.optString("error").ifBlank { "request_failed" },
@@ -79,20 +97,21 @@ fun LyrePane(
                 val odysseus = projects.firstOrNull { it.isOdysseus || it.boardId == "lyre" }
                     ?: return@runCatching LoadResult(error = "not_found")
                 store.projectId = odysseus.id
-                val boardJson = api.board(odysseus.boardId)
+                val boardJson = session.api.board(odysseus.boardId)
                 if (!boardJson.optBoolean("ok", false)) {
                     return@runCatching LoadResult(
                         error = boardJson.optString("error").ifBlank { "request_failed" },
                     )
                 }
                 val data = boardJson.optJSONObject("data") ?: JSONObject()
-                cache.writeBoardJson(odysseus.boardId, data)
+                session.cache.writeBoardJson(odysseus.boardId, data)
                 val decoded = LyreBoardCodec.decode(data)
                 LoadResult(board = decoded, boardId = odysseus.boardId)
             }.getOrElse { LoadResult(error = it.message ?: "request_failed") }
         }
-        board = result.board
-        boardId = result.boardId
+        if (result.board != null && result.boardId != null) {
+            session.bind(result.boardId, result.board)
+        }
         error = result.error
         loading = false
     }
@@ -102,7 +121,7 @@ fun LyrePane(
     when {
         loading -> {
             Column(Modifier.fillMaxSize()) {
-                LyreLoadBar(onBack)
+                LyreLoadBar { goBack() }
                 CircularProgressIndicator(
                     modifier = Modifier
                         .padding(horizontal = 20.dp, vertical = 16.dp)
@@ -114,7 +133,7 @@ fun LyrePane(
         }
         error != null -> {
             Column(Modifier.fillMaxSize()) {
-                LyreLoadBar(onBack)
+                LyreLoadBar { goBack() }
                 Text(
                     error ?: "",
                     color = GrokifyColors.GlowRose,
@@ -127,14 +146,16 @@ fun LyrePane(
             LyreEditor(
                 board = loaded,
                 boardId = loadedId,
-                cache = cache,
+                cache = session.cache,
                 store = store,
-                onBack = onBack,
+                onBack = { goBack() },
+                onApply = { session.apply(it) },
+                busy = busy != null,
             )
         }
         else -> {
             Column(Modifier.fillMaxSize()) {
-                LyreLoadBar(onBack)
+                LyreLoadBar { goBack() }
             }
         }
     }

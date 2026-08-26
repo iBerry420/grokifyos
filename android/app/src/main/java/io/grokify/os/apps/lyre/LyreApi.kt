@@ -4,9 +4,11 @@ import io.grokify.os.BuildConfig
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import org.json.JSONObject
+import java.io.File
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
@@ -49,6 +51,15 @@ class LyreApi(private val tokenProvider: () -> String?) {
         return streamClient.newCall(req).execute()
     }
 
+    /** POST raw body. Query action=storage_put&key= (URLEncoder). */
+    fun putStorage(key: String, file: File): JSONObject {
+        val encoded = URLEncoder.encode(key, "UTF-8")
+        val mime = mimeFor(file)
+        val body = file.asRequestBody(mime.toMediaType())
+        val req = auth("/lyre.php?action=storage_put&key=$encoded").post(body).build()
+        return streamClient.newCall(req).execute().use { parseJsonMetadata(it) }
+    }
+
     private fun get(actionQuery: String): JSONObject {
         val req = auth("/lyre.php?action=$actionQuery").get().build()
         return execute(req)
@@ -67,6 +78,31 @@ class LyreApi(private val tokenProvider: () -> String?) {
             b.header("Authorization", "Bearer $it")
         }
         return b
+    }
+
+    private fun parseJsonMetadata(resp: Response): JSONObject {
+        val text = resp.body?.string().orEmpty()
+        val json = try {
+            JSONObject(if (text.isBlank()) "{}" else text)
+        } catch (_: Exception) {
+            JSONObject().put("ok", false).put("error", "invalid_json")
+        }
+        if (!resp.isSuccessful && !json.has("error")) {
+            json.put("error", "http_${resp.code}")
+        }
+        if (!resp.isSuccessful) json.put("ok", false)
+        return json
+    }
+
+    private fun mimeFor(file: File): String {
+        return when (file.extension.lowercase()) {
+            "mp4" -> "video/mp4"
+            "m4a", "aac" -> "audio/mp4"
+            "jpg", "jpeg" -> "image/jpeg"
+            "png" -> "image/png"
+            "json" -> "application/json"
+            else -> "application/octet-stream"
+        }
     }
 
     private fun execute(req: Request): JSONObject {

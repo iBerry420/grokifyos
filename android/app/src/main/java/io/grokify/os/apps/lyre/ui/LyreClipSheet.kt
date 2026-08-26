@@ -1,6 +1,5 @@
 package io.grokify.os.apps.lyre.ui
 
-import android.widget.Toast
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -20,7 +19,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -28,6 +26,8 @@ import io.grokify.os.apps.lyre.BoardData
 import io.grokify.os.apps.lyre.Frame
 import io.grokify.os.apps.lyre.LayerClip
 import io.grokify.os.apps.lyre.LyreMovie
+import io.grokify.os.apps.lyre.LyreRules
+import io.grokify.os.apps.lyre.RuleResult
 import io.grokify.os.ui.theme.GrokifyColors
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -37,9 +37,11 @@ fun LyreClipSheet(
     frame: Frame,
     clip: LayerClip?,
     preferClip: Boolean,
+    nativeAtSec: Double? = null,
+    enabled: Boolean = true,
+    onApply: (RuleResult) -> Unit = {},
     onDismiss: () -> Unit,
 ) {
-    val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var tab by remember {
         mutableStateOf(
@@ -50,8 +52,11 @@ fun LyreClipSheet(
         LyreMovie.canStitchClip(clip.id, clip.src, board.videoLayers, board.movie)
     val canPop = (board.movie?.parts?.size ?: 0) > 1
 
-    fun later() {
-        Toast.makeText(context, "cutter in a later build", Toast.LENGTH_SHORT).show()
+    fun run(result: RuleResult) {
+        if (!enabled) return
+        if (result.plan == null && result.board === board) return
+        onApply(result)
+        onDismiss()
     }
 
     ModalBottomSheet(
@@ -94,11 +99,45 @@ fun LyreClipSheet(
                     .padding(top = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                if (canStitch) {
-                    SheetChip("Stitch", selected = false, onClick = { later() })
-                }
-                if (canPop) {
-                    SheetChip("Pop", selected = false, onClick = { later() })
+                if (tab == "clip") {
+                    if (canStitch) {
+                        SheetChip("Stitch", selected = false, onClick = {
+                            val id = clip?.id ?: return@SheetChip
+                            run(LyreRules.stitch(board, id))
+                        })
+                    }
+                    if (canPop) {
+                        SheetChip("Pop", selected = false, onClick = {
+                            run(LyreRules.pop(board))
+                        })
+                    }
+                    if (clip != null) {
+                        SheetChip("Trim", selected = false, onClick = {
+                            val inn = clip.trimInSec ?: frame.videoInSec ?: 0.0
+                            val at = nativeAtSec ?: return@SheetChip
+                            run(LyreRules.trim(board, clip.id, inn, at))
+                        })
+                        SheetChip("Split", selected = false, onClick = {
+                            val at = nativeAtSec ?: return@SheetChip
+                            run(LyreRules.split(board, clip.id, at))
+                        })
+                        SheetChip("Mute", selected = false, onClick = {
+                            run(LyreRules.mute(board, clip.id))
+                        })
+                        SheetChip("Restore", selected = false, onClick = {
+                            run(LyreRules.restoreClip(board, clip.id))
+                        })
+                        SheetChip("Remove", selected = false, onClick = {
+                            run(LyreRules.removeClip(board, clip.id))
+                        })
+                    }
+                } else {
+                    SheetChip("Restore", selected = false, onClick = {
+                        run(LyreRules.restorePicture(board, frame.id))
+                    })
+                    SheetChip("Remove", selected = false, onClick = {
+                        run(LyreRules.removeBeat(board, frame.id))
+                    })
                 }
             }
         }

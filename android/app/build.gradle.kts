@@ -12,11 +12,12 @@ android {
         applicationId = "io.grokify.os"
         minSdk = 26
         targetSdk = 35
-        versionCode = 279
-        versionName = "0.1.279"
+        versionCode = 316
+        versionName = "0.1.316"
         buildConfigField("String", "API_BASE", "\"https://grokifyos.grokpot.io/api\"")
         buildConfigField("String", "WS_URL", "\"wss://grokifyos.grokpot.io/grokify-ws/\"")
         buildConfigField("String", "SITE_URL", "\"https://grokifyos.grokpot.io\"")
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
@@ -39,6 +40,7 @@ android {
     }
     kotlinOptions {
         jvmTarget = "17"
+        freeCompilerArgs += "-opt-in=androidx.media3.common.util.UnstableApi"
     }
     buildFeatures {
         compose = true
@@ -87,6 +89,9 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.5.1")
     implementation("androidx.media3:media3-ui:1.5.1")
     implementation("androidx.media3:media3-datasource:1.5.1")
+    implementation("androidx.media3:media3-transformer:1.5.1")
+    implementation("androidx.media3:media3-effect:1.5.1")
+    implementation("androidx.media3:media3-muxer:1.5.1")
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("io.coil-kt:coil-gif:2.7.0")
     implementation("com.google.android.gms:play-services-wearable:18.2.0")
@@ -96,4 +101,9 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20231013")
+
+    androidTestImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
 }

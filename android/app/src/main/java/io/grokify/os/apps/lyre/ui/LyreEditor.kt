@@ -73,6 +73,7 @@ import io.grokify.os.apps.lyre.LyreMovie
 import io.grokify.os.apps.lyre.LyrePlayItem
 import io.grokify.os.apps.lyre.LyrePlayer
 import io.grokify.os.apps.lyre.LyreStore
+import io.grokify.os.apps.lyre.RuleResult
 import io.grokify.os.apps.lyre.StoryboardClip
 import io.grokify.os.apps.lyre.lyreClockTarget
 import io.grokify.os.apps.lyre.lyreNextVideoClip
@@ -98,6 +99,8 @@ fun LyreEditor(
     cache: LyreCache,
     store: LyreStore,
     onBack: () -> Unit,
+    onApply: (RuleResult) -> Unit = {},
+    busy: Boolean = false,
 ) {
     val context = LocalContext.current
     val player = remember { LyrePlayer(context.applicationContext) }
@@ -400,11 +403,23 @@ fun LyreEditor(
 
     val sheet = clipSheet
     if (sheet != null) {
+        val nativeAt = sheet.clip?.let { clip ->
+            val target = lyreClockTarget(board, playhead.toDouble())
+            if (target is LyreClockTarget.Leftover && target.clipId == clip.id) {
+                val win = LyreClip.presentedVideoWindow(clip)
+                win.inn + target.positionSec
+            } else {
+                null
+            }
+        }
         LyreClipSheet(
             board = board,
             frame = sheet.frame,
             clip = sheet.clip,
             preferClip = sheet.preferClip,
+            nativeAtSec = nativeAt,
+            enabled = !busy,
+            onApply = onApply,
             onDismiss = { clipSheet = null },
         )
     }

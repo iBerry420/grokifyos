@@ -393,6 +393,10 @@
             android:name=".apps.gbot.GbotWatchService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <service
+            android:name=".apps.lyre.LyreCutService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
         <receiver
             android:name=".apps.gbot.GbotWatchReceiver"
             android:exported="false">
