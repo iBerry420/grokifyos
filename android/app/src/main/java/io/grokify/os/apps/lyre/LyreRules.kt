@@ -176,7 +176,7 @@ object LyreRules {
         return RuleResult(retimeLinkedClips(next), null)
     }
 
-    fun setStill(board: BoardData, frameId: String, src: String): RuleResult {
+    fun setStill(board: BoardData, frameId: String, src: String, origSrc: String? = null): RuleResult {
         val frame = leftoverFrame(board, frameId) ?: return RuleResult(board, null)
         if (src.isEmpty()) return RuleResult(board, null)
         if (src == frame.src) {
@@ -186,7 +186,9 @@ object LyreRules {
             )
         }
         val extra = JSONObject(frame.extra?.toString() ?: "{}")
-        if (frame.src.isNotEmpty()) extra.put("origSrc", frame.src)
+        val existingOrig = extra.optString("origSrc").takeIf { it.isNotEmpty() }
+        val orig = existingOrig ?: origSrc?.takeIf { it.isNotEmpty() } ?: frame.src
+        if (orig.isNotEmpty() && orig != src) extra.put("origSrc", orig)
         val next = frame.copy(
             src = src,
             extra = extra,

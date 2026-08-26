@@ -19,6 +19,11 @@ class LyreApi(private val tokenProvider: () -> String?) {
         .readTimeout(120, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
+    private val stillClient = OkHttpClient.Builder()
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(180, TimeUnit.SECONDS)
+        .writeTimeout(120, TimeUnit.SECONDS)
+        .build()
     private val streamClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.MINUTES)
@@ -71,6 +76,7 @@ class LyreApi(private val tokenProvider: () -> String?) {
                 .put("frame_id", frameId)
                 .put("prompt", prompt)
                 .put("images", arr),
+            stillClient,
         )
     }
 
@@ -152,11 +158,11 @@ class LyreApi(private val tokenProvider: () -> String?) {
         return execute(req)
     }
 
-    private fun post(body: JSONObject): JSONObject {
+    private fun post(body: JSONObject, client: OkHttpClient = jsonClient): JSONObject {
         val req = auth("/lyre.php")
             .post(body.toString().toRequestBody(jsonMedia))
             .build()
-        return execute(req)
+        return execute(req, client)
     }
 
     private fun auth(path: String): Request.Builder {
@@ -192,9 +198,9 @@ class LyreApi(private val tokenProvider: () -> String?) {
         }
     }
 
-    private fun execute(req: Request): JSONObject {
+    private fun execute(req: Request, client: OkHttpClient = jsonClient): JSONObject {
         return try {
-            jsonClient.newCall(req).execute().use { resp ->
+            client.newCall(req).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
                 val json = try {
                     JSONObject(if (text.isBlank()) "{}" else text)

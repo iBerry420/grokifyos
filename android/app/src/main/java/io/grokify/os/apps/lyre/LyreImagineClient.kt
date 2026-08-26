@@ -33,6 +33,7 @@ object LyreImagine {
     const val MAX_VOICES = 3
     const val POLL_MS = 5_000L
     const val POLL_LIMIT_MS = 10L * 60L * 1000L
+    const val XAI_EDIT_MAX_SEC = 8.7
     const val XAI_IMAGES = "https://api.x.ai/v1/images/generations"
     const val XAI_VIDEOS = "https://api.x.ai/v1/videos/generations"
     const val XAI_VIDEO = "https://api.x.ai/v1/videos/"
@@ -146,6 +147,11 @@ object LyreImagine {
 
     fun coerceDuration(seconds: Int): Int = if (seconds >= 10) 10 else 6
 
+    fun coerceEditDuration(seconds: Int): Double {
+        val d = coerceDuration(seconds).toDouble()
+        return if (d > XAI_EDIT_MAX_SEC) XAI_EDIT_MAX_SEC else d
+    }
+
     fun coerceAspect(aspect: String): String {
         return when (aspect.trim()) {
             "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "2:1", "1:2" -> aspect.trim()
@@ -258,6 +264,7 @@ class LyreImagineClient(
         refKeys: List<String>,
         voiceIds: List<String>,
         poster: File?,
+        video: File?,
         refFiles: List<File>,
         dest: File,
     ): ImagineVideoResult {
@@ -274,8 +281,10 @@ class LyreImagineClient(
                 return ImagineVideoResult.Ready(dest, "grokme")
             }
         }
-        val xai = editXai(prompt, dur, asp, res, poster, voices, dest)
+        val xai = editXai(prompt, dur, asp, res, poster, video, voices, dest)
         if (xai is ImagineVideoResult.Ready) return xai
+        val fallbackOk = xai is ImagineVideoResult.Err && xai.reason == EDIT_ROUTE_MISSING
+        if (!fallbackOk) return ImagineVideoResult.Err("edit_unavailable")
         val fallback = video(
             projectId, boardId, prompt, dur, asp, res,
             imageKey.orEmpty(), refKeys, voices, poster, refFiles, dest,
@@ -291,11 +300,12 @@ class LyreImagineClient(
         val deadline = System.currentTimeMillis() + LyreImagine.POLL_LIMIT_MS
         while (System.currentTimeMillis() <= deadline) {
             val st = api.imagineStatus(requestId)
-            if (LyreImagine.grokmeFailed(st)) return false
             val status = st.optString("status")
             if (LyreImagine.jobFailed(status)) return false
-            if (LyreImagine.jobDone(status) || status.isEmpty() && LyreImagine.harvestUrl(st) != null) {
-                return materializeVideo(st, dest)
+            if (!LyreImagine.grokmeFailed(st)) {
+                if (LyreImagine.jobDone(status) || status.isEmpty() && LyreImagine.harvestUrl(st) != null) {
+                    return materializeVideo(st, dest)
+                }
             }
             delay(LyreImagine.POLL_MS)
         }
@@ -382,18 +392,22 @@ class LyreImagineClient(
         aspect: String,
         resolution: String,
         poster: File?,
+        video: File?,
         voices: List<String>,
         dest: File,
     ): ImagineVideoResult {
         val key = xaiKey()?.trim().orEmpty()
         if (key.isEmpty()) return ImagineVideoResult.Err("spacexai_key")
+        val videoUrl = video?.let { LyreImagine.dataUrl(it) }
+            ?: return ImagineVideoResult.Err("edit_unavailable")
         val posterUrl = poster?.let { LyreImagine.dataUrl(it) }
         val body = JSONObject()
             .put("model", LyreImagine.VIDEO_MODEL)
             .put("prompt", LyreImagine.taggedPrompt(prompt, if (posterUrl != null) 1 else 0, voices.size))
-            .put("duration", duration)
+            .put("duration", LyreImagine.coerceEditDuration(duration))
             .put("aspect_ratio", aspect)
             .put("resolution", resolution)
+            .put("video", JSONObject().put("url", videoUrl))
         if (posterUrl != null) {
             body.put("image", JSONObject().put("url", posterUrl))
         }
@@ -404,7 +418,7 @@ class LyreImagineClient(
         }
         val json = xaiPost(LyreImagine.XAI_EDITS, key, body) ?: return ImagineVideoResult.Err("edit_unavailable")
         val httpStatus = json.optInt("http_status", 0)
-        if (httpStatus == 404 || httpStatus == 405) return ImagineVideoResult.Err("edit_unavailable")
+        if (httpStatus == 404 || httpStatus == 405) return ImagineVideoResult.Err(EDIT_ROUTE_MISSING)
         val rid = LyreImagine.requestId(json) ?: return ImagineVideoResult.Err("edit_unavailable")
         return if (pollXai(rid, key, dest)) ImagineVideoResult.Ready(dest, "spacexai")
         else ImagineVideoResult.Err("edit_unavailable")
@@ -540,6 +554,8 @@ class LyreImagineClient(
     }
 
     companion object {
+        private const val EDIT_ROUTE_MISSING = "edit_route_missing"
+
         private fun defaultHttp(): OkHttpClient {
             return OkHttpClient.Builder()
                 .connectTimeout(30, TimeUnit.SECONDS)

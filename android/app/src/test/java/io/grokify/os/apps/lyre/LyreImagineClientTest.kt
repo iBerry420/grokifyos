@@ -53,6 +53,19 @@ class LyreImagineClientTest {
         assertEquals("9:16", LyreImagine.coerceAspect("9:16"))
         assertEquals("720p", LyreImagine.coerceResolution("1080p"))
         assertEquals("480p", LyreImagine.coerceResolution("480p"))
+        assertEquals(6.0, LyreImagine.coerceEditDuration(6), 0.0)
+        assertEquals(LyreImagine.XAI_EDIT_MAX_SEC, LyreImagine.coerceEditDuration(10), 0.0)
+        assertEquals(LyreImagine.XAI_EDIT_MAX_SEC, LyreImagine.coerceEditDuration(12), 0.0)
+    }
+
+    @Test
+    fun grokmeStatusBlipIsNotJobFailed() {
+        val blip = JSONObject().put("ok", false).put("error", "http_502")
+        assertTrue(LyreImagine.grokmeFailed(blip))
+        assertFalse(LyreImagine.jobFailed(blip.optString("status")))
+        val failed = JSONObject().put("ok", true).put("status", "failed")
+        assertFalse(LyreImagine.grokmeFailed(failed))
+        assertTrue(LyreImagine.jobFailed(failed.optString("status")))
     }
 
     @Test
@@ -98,5 +111,17 @@ class LyreImagineClientTest {
             f.delete()
         }
         assertNull(LyreImagine.inlineImage(File("/no/such/lyre.jpg")))
+    }
+
+    @Test
+    fun dataUrlEncodesMp4() {
+        val f = File.createTempFile("lyre", ".mp4")
+        try {
+            f.writeBytes(byteArrayOf(0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70))
+            val url = LyreImagine.dataUrl(f)
+            assertTrue(url!!.startsWith("data:video/mp4;base64,"))
+        } finally {
+            f.delete()
+        }
     }
 }

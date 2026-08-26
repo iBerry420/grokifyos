@@ -90,7 +90,8 @@ fun LyreClipSheet(
         LyreMovie.canStitchClip(clip.id, clip.src, board.videoLayers, board.movie)
     val canPop = (board.movie?.parts?.size ?: 0) > 1
     val leftover = LyreRules.leftoverFrame(board, frame.id) != null
-    val canImagine = enabled && leftover && !imagineBusy &&
+    val canMutate = enabled && !imagineBusy
+    val canImagine = canMutate && leftover &&
         frame.generating != true && frame.videoGenerating != true
     val locked = board.videoGen?.locked == true
     var prompt by remember {
@@ -134,7 +135,7 @@ fun LyreClipSheet(
     }
 
     fun run(result: RuleResult) {
-        if (!enabled) return
+        if (!canMutate) return
         if (result.plan == null && result.board === board) return
         onApply(result)
         onDismiss()
@@ -197,33 +198,33 @@ fun LyreClipSheet(
             ) {
                 if (tab == "clip") {
                     if (canStitch) {
-                        SheetChip("Stitch", selected = false, enabled = enabled, onClick = {
+                        SheetChip("Stitch", selected = false, enabled = canMutate, onClick = {
                             val id = clip?.id ?: return@SheetChip
                             run(LyreRules.stitch(board, id))
                         })
                     }
                     if (canPop) {
-                        SheetChip("Pop", selected = false, enabled = enabled, onClick = {
+                        SheetChip("Pop", selected = false, enabled = canMutate, onClick = {
                             run(LyreRules.pop(board))
                         })
                     }
                     if (clip != null) {
-                        SheetChip("Trim", selected = false, enabled = enabled, onClick = {
+                        SheetChip("Trim", selected = false, enabled = canMutate, onClick = {
                             val inn = clip.trimInSec ?: frame.videoInSec ?: 0.0
                             val at = nativeAtSec ?: return@SheetChip
                             run(LyreRules.trim(board, clip.id, inn, at))
                         })
-                        SheetChip("Split", selected = false, enabled = enabled, onClick = {
+                        SheetChip("Split", selected = false, enabled = canMutate, onClick = {
                             val at = nativeAtSec ?: return@SheetChip
                             run(LyreRules.split(board, clip.id, at))
                         })
-                        SheetChip("Mute", selected = false, enabled = enabled, onClick = {
+                        SheetChip("Mute", selected = false, enabled = canMutate, onClick = {
                             run(LyreRules.mute(board, clip.id))
                         })
-                        SheetChip("Restore", selected = false, enabled = enabled, onClick = {
+                        SheetChip("Restore", selected = false, enabled = canMutate, onClick = {
                             run(LyreRules.restoreClip(board, clip.id))
                         })
-                        SheetChip("Remove", selected = false, enabled = enabled, onClick = {
+                        SheetChip("Remove", selected = false, enabled = canMutate, onClick = {
                             run(LyreRules.removeClip(board, clip.id))
                         })
                     }
@@ -257,10 +258,10 @@ fun LyreClipSheet(
                         }
                     }
                 } else {
-                    SheetChip("Restore", selected = false, enabled = enabled, onClick = {
+                    SheetChip("Restore", selected = false, enabled = canMutate, onClick = {
                         run(LyreRules.restorePicture(board, frame.id))
                     })
-                    SheetChip("Remove", selected = false, enabled = enabled, onClick = {
+                    SheetChip("Remove", selected = false, enabled = canMutate, onClick = {
                         run(LyreRules.removeBeat(board, frame.id))
                     })
                     if (leftover) {
@@ -281,7 +282,7 @@ fun LyreClipSheet(
                         SheetChip("Files", selected = false, enabled = canImagine, onClick = {
                             pickFiles.launch("*/*")
                         })
-                        SheetChip("Hold", selected = false, enabled = enabled, onClick = {
+                        SheetChip("Hold", selected = false, enabled = canMutate, onClick = {
                             run(LyreRules.insertHold(board, frame.id))
                         })
                         if (!frame.generatingError.isNullOrBlank()) {

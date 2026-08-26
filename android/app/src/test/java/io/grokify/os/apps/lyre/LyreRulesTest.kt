@@ -157,6 +157,36 @@ class LyreRulesTest {
         )
         assertNull(frameOf(holdStill.board, "fr_hold").generatingError)
 
+        val again = LyreRules.setStill(holdStill.board, "fr_hold", "boards/lyre/frames/hold3.jpg")
+        assertEquals("boards/lyre/frames/hold3.jpg", frameOf(again.board, "fr_hold").src)
+        assertEquals(
+            "boards/lyre/frames/fr_hold.jpg",
+            frameOf(again.board, "fr_hold").extra?.optString("origSrc"),
+        )
+
+        val snap = LyreRules.setStill(
+            unstitched,
+            "fr_hold",
+            "boards/lyre/frames/hold_g.jpg",
+            origSrc = "boards/lyre/frames/fr_hold.orig.jpg",
+        )
+        assertEquals("boards/lyre/frames/hold_g.jpg", frameOf(snap.board, "fr_hold").src)
+        assertEquals(
+            "boards/lyre/frames/fr_hold.orig.jpg",
+            frameOf(snap.board, "fr_hold").extra?.optString("origSrc"),
+        )
+        val snap2 = LyreRules.setStill(
+            snap.board,
+            "fr_hold",
+            "boards/lyre/frames/hold_g2.jpg",
+            origSrc = "boards/lyre/frames/hold_g.jpg",
+        )
+        assertEquals("boards/lyre/frames/hold_g2.jpg", frameOf(snap2.board, "fr_hold").src)
+        assertEquals(
+            "boards/lyre/frames/fr_hold.orig.jpg",
+            frameOf(snap2.board, "fr_hold").extra?.optString("origSrc"),
+        )
+
         val movieClip = LyreRules.attachClip(unstitched, "fr_a", "boards/lyre/clips/new.mp4", 6.0, 24.0)
         assertSame(unstitched, movieClip.board)
 
@@ -174,6 +204,12 @@ class LyreRulesTest {
         assertEquals(clip.src, frameOf(replaced.board, "fr_b").videoSrc)
         assertNull(frameOf(replaced.board, "fr_b").videoGeneratingError)
         assertDualWrite(replaced.board)
+
+        val replaced2 = LyreRules.attachClip(replaced.board, "fr_b", "boards/lyre/clips/lc_b_gen2.mp4", 6.0, 24.0)
+        assertEquals("boards/lyre/clips/lc_b_gen2.mp4", clipOf(replaced2.board, "lc_b").src)
+        assertEquals("boards/lyre/clips/lc_b.mp4", clipOf(replaced2.board, "lc_b").origSrc)
+        assertEquals("boards/lyre/clips/lc_b.mp4", frameOf(replaced2.board, "fr_b").origVideoSrc)
+        assertDualWrite(replaced2.board)
     }
 
     @Test

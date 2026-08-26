@@ -926,8 +926,13 @@ function gos_lyre_download_url(string $url): ?string
     ]);
     $raw = curl_exec($ch);
     $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $expected = curl_getinfo($ch, CURLINFO_CONTENT_LENGTH_DOWNLOAD);
+    $errno = curl_errno($ch);
     curl_close($ch);
-    if ($status !== 200 || !is_string($raw) || $raw === '') {
+    if ($errno !== 0 || $status !== 200 || !is_string($raw) || $raw === '') {
+        return null;
+    }
+    if (is_numeric($expected) && (float) $expected >= 0.0 && strlen($raw) !== (int) $expected) {
         return null;
     }
     return $raw;
