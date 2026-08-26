@@ -44,6 +44,32 @@ class LyreApi(private val tokenProvider: () -> String?) {
     fun saveBoard(id: String, data: JSONObject): JSONObject =
         post(JSONObject().put("action", "save_board").put("id", id).put("data", data))
 
+    /** JSON POST; copies compiled mp4 to public/watch or deletes it. */
+    fun publish(id: String, visibility: String, compiledKey: String?): JSONObject {
+        val body = JSONObject().put("action", "publish").put("id", id).put("visibility", visibility)
+        if (!compiledKey.isNullOrBlank()) body.put("compiled_key", compiledKey)
+        return post(body)
+    }
+
+    /** 200 only; 401/404/405 → false (use proxy). Range GET if HEAD is not allowed. */
+    fun publicWatchReachable(url: String): Boolean {
+        return try {
+            val head = Request.Builder().url(url).head().build()
+            jsonClient.newCall(head).execute().use { resp ->
+                if (resp.code == 200) return true
+                if (resp.code != 405 && resp.code != 501) return false
+            }
+            val range = Request.Builder()
+                .url(url)
+                .get()
+                .header("Range", "bytes=0-1")
+                .build()
+            jsonClient.newCall(range).execute().use { it.code == 200 || it.code == 206 }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     /** Raw 200 body. Caller must close. JSON error body if !isSuccessful. */
     fun getStorage(key: String): Response {
         val encoded = URLEncoder.encode(key, "UTF-8")
@@ -127,3 +153,9 @@ class LyreApi(private val tokenProvider: () -> String?) {
 
     private fun enc(value: String): String = URLEncoder.encode(value, "UTF-8")
 }
+
+fun lyreWatchProxyUrl(token: String): String =
+    BuildConfig.API_BASE.trimEnd('/') + "/lyre-watch.php?token=" + token
+
+fun lyreWatchGrokmeUrl(token: String): String =
+    "https://me.grokpot.io/v1/storage/public/watch/$token.mp4"

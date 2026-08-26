@@ -637,6 +637,279 @@ function gos_lyre_post_delete(array $access, array $body): never
     gos_api_json(['ok' => true]);
 }
 
+function gos_lyre_me_storage_url(string $key): string
+{
+    $base = rtrim((string) (gos_env('GROKIFY_LYRE_ME_STORAGE_BASE', 'https://me.grokpot.io/v1/storage') ?? ''), '/');
+    return $base . '/' . implode('/', array_map('rawurlencode', explode('/', $key)));
+}
+
+function gos_lyre_me_api_key(): string
+{
+    return (string) (gos_env('GROKIFY_LYRE_ME_API_KEY', '') ?? '');
+}
+
+function gos_lyre_compiled_key(string $boardId, string $raw): ?string
+{
+    $key = gos_lyre_storage_key($raw);
+    if ($key === null) {
+        return null;
+    }
+    $prefix = 'boards/' . $boardId . '/';
+    if (!str_starts_with($key, $prefix)) {
+        return null;
+    }
+    return $key;
+}
+
+function gos_lyre_new_watch_token(PDO $mysql): string
+{
+    for ($i = 0; $i < 8; $i++) {
+        $token = bin2hex(random_bytes(16));
+        $st = $mysql->prepare('SELECT 1 FROM lyre_projects WHERE watch_token = ? LIMIT 1');
+        $st->execute([$token]);
+        if ($st->fetch() === false) {
+            return $token;
+        }
+    }
+    gos_api_json(['ok' => false, 'error' => 'token_failed'], 500);
+}
+
+/** @return array{watch_url_proxy: string, watch_url_grokme: string} */
+function gos_lyre_watch_urls(string $token): array
+{
+    $site = rtrim(gos_site_url(), '/');
+    return [
+        'watch_url_proxy' => $site . '/api/lyre-watch.php?token=' . $token,
+        'watch_url_grokme' => 'https://me.grokpot.io/v1/storage/public/watch/' . $token . '.mp4',
+    ];
+}
+
+/**
+ * Download grokme object to a tmpfile. Truncated bodies are errors, not hits.
+ *
+ * @return resource
+ */
+function gos_lyre_me_download_tmp(string $key, int $failStatus = 502, string $failError = 'storage_get_failed')
+{
+    $apiKey = gos_lyre_me_api_key();
+    $base = rtrim((string) (gos_env('GROKIFY_LYRE_ME_STORAGE_BASE', 'https://me.grokpot.io/v1/storage') ?? ''), '/');
+    if ($base === '' || $apiKey === '') {
+        gos_lyre_json_error('lyre_storage_unconfigured', 503);
+    }
+    if (!function_exists('curl_init')) {
+        gos_lyre_json_error('curl_missing', 500);
+    }
+    $tmp = tmpfile();
+    if ($tmp === false) {
+        gos_lyre_json_error('storage_get_failed', 502);
+    }
+    $status = 0;
+    $contentLength = null;
+    $bytes = 0;
+    $ch = curl_init(gos_lyre_me_storage_url($key));
+    if ($ch === false) {
+        fclose($tmp);
+        gos_lyre_json_error('storage_get_failed', 502);
+    }
+    curl_setopt_array($ch, [
+        CURLOPT_HTTPGET => true,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_CONNECTTIMEOUT => 30,
+        CURLOPT_TIMEOUT => 300,
+        CURLOPT_HTTPHEADER => [
+            'Authorization: Bearer ' . $apiKey,
+            'Accept: */*',
+        ],
+        CURLOPT_HEADERFUNCTION => static function ($ch, string $header) use (&$status, &$contentLength): int {
+            if (preg_match('#^HTTP/\S+\s+(\d+)#', $header, $m) === 1) {
+                $status = (int) $m[1];
+            } elseif (stripos($header, 'Content-Length:') === 0) {
+                $contentLength = trim(substr($header, strlen('Content-Length:')));
+            }
+            return strlen($header);
+        },
+        CURLOPT_WRITEFUNCTION => static function ($ch, string $data) use ($tmp, &$bytes): int {
+            $n = fwrite($tmp, $data);
+            if ($n === false) {
+                return 0;
+            }
+            $bytes += $n;
+            return $n;
+        },
+    ]);
+    $ok = curl_exec($ch);
+    $errno = curl_errno($ch);
+    curl_close($ch);
+    $short = is_string($contentLength) && $contentLength !== '' && ctype_digit($contentLength)
+        && $bytes !== (int) $contentLength;
+    if ($ok === false || $errno !== 0 || $bytes <= 0 || $short || $status !== 200) {
+        fclose($tmp);
+        if ($status === 404) {
+            gos_lyre_json_error($failError, 404);
+        }
+        if ($short || $bytes <= 0) {
+            gos_lyre_json_error('storage_get_failed', 502);
+        }
+        gos_lyre_json_error($failError, $status >= 400 ? $status : $failStatus);
+    }
+    rewind($tmp);
+    return $tmp;
+}
+
+function gos_lyre_me_upload_tmp(string $key, $tmp, string $ctype = 'video/mp4'): void
+{
+    $apiKey = gos_lyre_me_api_key();
+    if ($apiKey === '') {
+        fclose($tmp);
+        gos_lyre_json_error('lyre_storage_unconfigured', 503);
+    }
+    if (!function_exists('curl_init')) {
+        fclose($tmp);
+        gos_lyre_json_error('curl_missing', 500);
+    }
+    rewind($tmp);
+    $stat = fstat($tmp);
+    $size = (int) ($stat['size'] ?? 0);
+    if ($size <= 0) {
+        fclose($tmp);
+        gos_lyre_json_error('empty_body', 400);
+    }
+    $ch = curl_init(gos_lyre_me_storage_url($key));
+    if ($ch === false) {
+        fclose($tmp);
+        gos_lyre_json_error('storage_put_failed', 502);
+    }
+    curl_setopt_array($ch, [
+        CURLOPT_CUSTOMREQUEST => 'POST',
+        CURLOPT_UPLOAD => true,
+        CURLOPT_INFILE => $tmp,
+        CURLOPT_INFILESIZE => $size,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_CONNECTTIMEOUT => 30,
+        CURLOPT_TIMEOUT => 300,
+        CURLOPT_HTTPHEADER => [
+            'Authorization: Bearer ' . $apiKey,
+            'Content-Type: ' . $ctype,
+            'Content-Length: ' . (string) $size,
+        ],
+    ]);
+    $raw = curl_exec($ch);
+    $errno = curl_errno($ch);
+    $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    fclose($tmp);
+    if ($errno === 28) {
+        gos_lyre_json_error('storage_put_timeout', 504);
+    }
+    if ($raw === false || $errno !== 0 || $status < 200 || $status >= 300) {
+        gos_lyre_json_error('storage_put_failed', $status >= 400 ? $status : 502);
+    }
+}
+
+function gos_lyre_me_delete(string $key): void
+{
+    $apiKey = gos_lyre_me_api_key();
+    $base = rtrim((string) (gos_env('GROKIFY_LYRE_ME_STORAGE_BASE', 'https://me.grokpot.io/v1/storage') ?? ''), '/');
+    if ($base === '' || $apiKey === '') {
+        return;
+    }
+    if (!function_exists('curl_init')) {
+        return;
+    }
+    $ch = curl_init(gos_lyre_me_storage_url($key));
+    if ($ch === false) {
+        return;
+    }
+    curl_setopt_array($ch, [
+        CURLOPT_CUSTOMREQUEST => 'DELETE',
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_CONNECTTIMEOUT => 30,
+        CURLOPT_TIMEOUT => 60,
+        CURLOPT_HTTPHEADER => [
+            'Authorization: Bearer ' . $apiKey,
+            'Accept: */*',
+        ],
+    ]);
+    curl_exec($ch);
+    curl_close($ch);
+}
+
+function gos_lyre_lookup_project(PDO $mysql, int $userId, array $body): ?array
+{
+    $id = trim((string) ($body['id'] ?? ''));
+    $boardId = trim((string) ($body['board_id'] ?? ''));
+    $row = null;
+    if ($id !== '') {
+        $row = gos_lyre_project_by_id($mysql, $userId, $id);
+        if ($row === null) {
+            $row = gos_lyre_project_by_board($mysql, $userId, $id);
+        }
+    }
+    if ($row === null && $boardId !== '') {
+        $row = gos_lyre_project_by_board($mysql, $userId, $boardId);
+    }
+    return $row;
+}
+
+function gos_lyre_post_publish(array $access, array $body): never
+{
+    $userId = gos_lyre_user_id($access);
+    $mysql = gos_lyre_mysql();
+    $row = gos_lyre_lookup_project($mysql, $userId, $body);
+    if ($row === null) {
+        gos_api_json(['ok' => false, 'error' => 'not_found'], 404);
+    }
+    $visibility = strtolower(trim((string) ($body['visibility'] ?? '')));
+    if ($visibility !== 'public' && $visibility !== 'private') {
+        gos_api_json(['ok' => false, 'error' => 'visibility_required'], 400);
+    }
+    $boardId = (string) $row['board_id'];
+    $projectId = (string) $row['id'];
+    $token = isset($row['watch_token']) && is_string($row['watch_token']) && preg_match('/^[a-f0-9]{32}$/', $row['watch_token']) === 1
+        ? $row['watch_token']
+        : null;
+    if ($visibility === 'private') {
+        if ($token !== null) {
+            gos_lyre_me_delete('public/watch/' . $token . '.mp4');
+        }
+        $st = $mysql->prepare(
+            'UPDATE lyre_projects SET visibility = ? WHERE id = ? AND user_id = ?'
+        );
+        $st->execute(['private', $projectId, $userId]);
+        $fresh = gos_lyre_project_by_id($mysql, $userId, $projectId);
+        $out = ['ok' => true, 'project' => gos_lyre_project_public($fresh ?? $row)];
+        if ($token !== null) {
+            $out = array_merge($out, gos_lyre_watch_urls($token));
+        }
+        gos_api_json($out);
+    }
+    $compiled = trim((string) ($body['compiled_key'] ?? $body['compiledKey'] ?? ''));
+    if ($compiled === '') {
+        $compiled = (string) ($row['compiled_key'] ?? '');
+    }
+    $compiledKey = gos_lyre_compiled_key($boardId, $compiled);
+    if ($compiledKey === null) {
+        gos_api_json(['ok' => false, 'error' => 'compiled_missing'], 400);
+    }
+    if ($token === null) {
+        $token = gos_lyre_new_watch_token($mysql);
+    }
+    $dest = 'public/watch/' . $token . '.mp4';
+    $tmp = gos_lyre_me_download_tmp($compiledKey, 404, 'compiled_missing');
+    gos_lyre_me_upload_tmp($dest, $tmp, 'video/mp4');
+    $st = $mysql->prepare(
+        'UPDATE lyre_projects SET visibility = ?, watch_token = ?, compiled_key = ? WHERE id = ? AND user_id = ?'
+    );
+    $st->execute(['public', $token, $compiledKey, $projectId, $userId]);
+    $fresh = gos_lyre_project_by_id($mysql, $userId, $projectId);
+    gos_api_json(array_merge(
+        ['ok' => true, 'project' => gos_lyre_project_public($fresh ?? $row)],
+        gos_lyre_watch_urls($token)
+    ));
+}
+
 function gos_lyre_post_save_board(array $access, array $body): never
 {
     $userId = gos_lyre_user_id($access);
@@ -715,5 +988,8 @@ if ($action === 'delete') {
 }
 if ($action === 'save_board') {
     gos_lyre_post_save_board($access, $body);
+}
+if ($action === 'publish') {
+    gos_lyre_post_publish($access, $body);
 }
 gos_api_json(['ok' => false, 'error' => 'unknown_action'], 400);

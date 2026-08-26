@@ -1,5 +1,9 @@
 package io.grokify.os.apps.lyre.ui
 
+import android.net.Uri
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -66,12 +70,16 @@ import coil.compose.AsyncImage
 import io.grokify.os.apps.lyre.BoardData
 import io.grokify.os.apps.lyre.Frame
 import io.grokify.os.apps.lyre.LayerClip
+import io.grokify.os.apps.lyre.LibraryAudio
+import io.grokify.os.apps.lyre.LyreApi
 import io.grokify.os.apps.lyre.LyreCache
 import io.grokify.os.apps.lyre.LyreClip
 import io.grokify.os.apps.lyre.LyreClockTarget
 import io.grokify.os.apps.lyre.LyreMovie
 import io.grokify.os.apps.lyre.LyrePlayItem
 import io.grokify.os.apps.lyre.LyrePlayer
+import io.grokify.os.apps.lyre.LyreProject
+import io.grokify.os.apps.lyre.LyreRules
 import io.grokify.os.apps.lyre.LyreStore
 import io.grokify.os.apps.lyre.RuleResult
 import io.grokify.os.apps.lyre.StoryboardClip
@@ -101,6 +109,12 @@ fun LyreEditor(
     onBack: () -> Unit,
     onApply: (RuleResult) -> Unit = {},
     busy: Boolean = false,
+    project: LyreProject? = null,
+    watchBusy: Boolean = false,
+    watchError: String? = null,
+    watchApi: LyreApi? = null,
+    onPublish: (Boolean) -> Unit = {},
+    onInsertAudioUri: (String, Uri, String) -> Unit = { _, _, _ -> },
 ) {
     val context = LocalContext.current
     val player = remember { LyrePlayer(context.applicationContext) }
@@ -119,6 +133,20 @@ fun LyreEditor(
     var program by remember { mutableStateOf<List<LyrePlayItem>>(emptyList()) }
     var onHold by remember { mutableStateOf(false) }
     var clipSheet by remember { mutableStateOf<ClipSheetTarget?>(null) }
+    var watchOpen by remember { mutableStateOf(false) }
+    var audioFrameId by remember { mutableStateOf<String?>(null) }
+    val pickAudio = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val frameId = audioFrameId ?: return@rememberLauncherForActivityResult
+        audioFrameId = null
+        if (uri == null || busy) return@rememberLauncherForActivityResult
+        onInsertAudioUri(frameId, uri, uri.lastPathSegment?.substringAfterLast('/') ?: "Audio")
+    }
+    val pickAudioFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val frameId = audioFrameId ?: return@rememberLauncherForActivityResult
+        audioFrameId = null
+        if (uri == null || busy) return@rememberLauncherForActivityResult
+        onInsertAudioUri(frameId, uri, uri.lastPathSegment?.substringAfterLast('/') ?: "Audio")
+    }
 
     fun persistPlayhead() {
         store.playhead = playhead
@@ -261,6 +289,14 @@ fun LyreEditor(
                     .clickable { switcher = true }
                     .padding(end = 8.dp),
             )
+            TextButton(onClick = { watchOpen = true }) {
+                Text(
+                    if (project?.visibility == "public") "Watch" else "Public",
+                    color = if (project?.visibility == "public") GrokifyColors.GlowRose else GrokifyColors.TextPrimary,
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 14.sp,
+                )
+            }
             TextButton(
                 onClick = {
                     museOpen = !museOpen
@@ -339,7 +375,22 @@ fun LyreEditor(
         )
 
         if (board.audioLayers.isNotEmpty()) {
-            LyreAudioRails(board.audioLayers)
+            LyreAudioRails(
+                layers = board.audioLayers,
+                canBurn = board.movie != null && board.audioLayers.any { it.clips.isNotEmpty() },
+                enabled = !busy,
+                onBurn = {
+                    if (!LYRE_BURN_AUDIO_DEVICE_GREEN) {
+                        Toast.makeText(
+                            context,
+                            "Burn-audio mix isn't device-green",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    } else {
+                        onApply(LyreRules.burnAudio(board))
+                    }
+                },
+            )
         }
 
         Box(
@@ -420,7 +471,30 @@ fun LyreEditor(
             nativeAtSec = nativeAt,
             enabled = !busy,
             onApply = onApply,
+            onPickAudio = {
+                audioFrameId = sheet.frame.id
+                pickAudio.launch("audio/*")
+            },
+            onPickAudioFile = {
+                audioFrameId = sheet.frame.id
+                pickAudioFile.launch(arrayOf("audio/*"))
+            },
+            onPickLibraryAudio = { item ->
+                insertLibraryAudio(board, sheet.frame.id, item, onApply)
+            },
             onDismiss = { clipSheet = null },
+        )
+    }
+
+    val api = watchApi
+    if (watchOpen && api != null) {
+        LyreWatch(
+            project = project,
+            watchBusy = watchBusy,
+            watchError = watchError,
+            api = api,
+            onPublish = onPublish,
+            onDismiss = { watchOpen = false },
         )
     }
 }
@@ -766,7 +840,12 @@ private fun LyreVideoRail(
 }
 
 @Composable
-private fun LyreAudioRails(layers: List<io.grokify.os.apps.lyre.MediaLayer>) {
+private fun LyreAudioRails(
+    layers: List<io.grokify.os.apps.lyre.MediaLayer>,
+    canBurn: Boolean,
+    enabled: Boolean,
+    onBurn: () -> Unit,
+) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp)) {
         layers.forEach { layer ->
             Row(
@@ -800,6 +879,28 @@ private fun LyreAudioRails(layers: List<io.grokify.os.apps.lyre.MediaLayer>) {
                 }
             }
         }
+        if (canBurn) {
+            FilterChip(
+                selected = false,
+                onClick = onBurn,
+                enabled = enabled,
+                label = { Text("Burn", fontSize = 11.sp, maxLines = 1) },
+                modifier = Modifier.padding(top = 2.dp),
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = GrokifyColors.GlowRose.copy(alpha = 0.22f),
+                    selectedLabelColor = GrokifyColors.GlowRose,
+                    containerColor = GrokifyColors.PanelSoft,
+                    labelColor = GrokifyColors.TextMuted,
+                    disabledLabelColor = GrokifyColors.TextDim,
+                ),
+                border = FilterChipDefaults.filterChipBorder(
+                    enabled = enabled,
+                    selected = false,
+                    borderColor = GrokifyColors.PanelBorder,
+                    selectedBorderColor = GrokifyColors.GlowRose,
+                ),
+            )
+        }
     }
 }
 
@@ -822,4 +923,21 @@ private fun posterFile(
 private fun fmtTime(sec: Float): String {
     val s = sec.coerceAtLeast(0f).toInt()
     return "%d:%02d".format(s / 60, s % 60)
+}
+
+private fun insertLibraryAudio(
+    board: BoardData,
+    frameId: String,
+    item: LibraryAudio,
+    onApply: (RuleResult) -> Unit,
+) {
+    onApply(
+        LyreRules.insertAudio(
+            board,
+            frameId,
+            item.src,
+            item.name.ifBlank { "Audio" },
+            item.durationSec.coerceAtLeast(0.1),
+        ),
+    )
 }

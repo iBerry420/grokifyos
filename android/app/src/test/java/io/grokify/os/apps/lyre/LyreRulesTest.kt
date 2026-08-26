@@ -272,6 +272,62 @@ class LyreRulesTest {
         assertSame(unstitched, movieExtract.board)
     }
 
+    @Test
+    fun insertAudioLeftoverOnlyZeroStartOk() {
+        val unstitched = fixture("unstitched")
+        val leftover = LyreRules.insertAudio(
+            unstitched,
+            "fr_b",
+            "boards/lyre/audio/bed.m4a",
+            "Bed",
+            2.0,
+        )
+        assertNull(leftover.plan)
+        assertEquals(1, leftover.board.audioLayers.size)
+        val bed = leftover.board.audioLayers[0].clips[0]
+        assertEquals("fr_b", bed.linkedFrameId)
+        assertEquals(clipOf(unstitched, "lc_b").startSec, bed.startSec, 0.0)
+        assertEquals("boards/lyre/audio/bed.m4a", bed.src)
+
+        val movie = LyreRules.insertAudio(
+            unstitched,
+            "fr_a",
+            "boards/lyre/audio/bed.m4a",
+            "Bed",
+            2.0,
+        )
+        assertSame(unstitched, movie.board)
+
+        val hold = LyreRules.insertAudio(
+            unstitched,
+            "fr_hold",
+            "boards/lyre/audio/bed.m4a",
+            "Bed",
+            1.0,
+        )
+        assertEquals(1, hold.board.audioLayers.size)
+        assertEquals("fr_hold", hold.board.audioLayers[0].clips[0].linkedFrameId)
+        assertEquals(4.0, hold.board.audioLayers[0].clips[0].startSec, 0.0)
+    }
+
+    @Test
+    fun burnAudioWritesBurnKeepsCaptionJson() {
+        val unstitched = fixture("unstitched")
+        val extracted = LyreRules.extractAudio(unstitched, "lc_b")
+        val burned = LyreRules.burnAudio(extracted.board)
+        assertEquals(CutKind.BURN_AUDIO, burned.plan?.kind)
+        assertEquals("boards/lyre/movie.burn.mp4", burned.board.movie?.src)
+        assertEquals(unstitched.movie?.src, burned.board.movie?.origSrc)
+        assertEquals("A", frameOf(burned.board, "fr_a").caption)
+        assertEquals("B", frameOf(burned.board, "fr_b").caption)
+        assertEquals(frameOf(unstitched, "fr_a").dialogue, frameOf(burned.board, "fr_a").dialogue)
+        assertEquals(frameOf(unstitched, "fr_a").notes, frameOf(burned.board, "fr_a").notes)
+
+        val empty = LyreRules.burnAudio(unstitched)
+        assertSame(unstitched, empty.board)
+        assertNull(empty.plan)
+    }
+
     private fun fixture(name: String): BoardData {
         val path = "/io/grokify/os/apps/lyre/fixtures/$name.json"
         val text = LyreRulesTest::class.java.getResourceAsStream(path)?.bufferedReader()?.use { it.readText() }

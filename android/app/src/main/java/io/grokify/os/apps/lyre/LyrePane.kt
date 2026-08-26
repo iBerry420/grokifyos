@@ -57,6 +57,9 @@ fun LyrePane(
     val board by session.board.collectAsState()
     val boardId by session.boundBoardId.collectAsState()
     val busy by session.busy.collectAsState()
+    val project by session.project.collectAsState()
+    val watchBusy by session.watchBusy.collectAsState()
+    val watchError by session.watchError.collectAsState()
 
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -91,6 +94,14 @@ fun LyrePane(
                 if (session.board.value == null) {
                     session.bind(boundId, localBoard)
                 }
+                if (session.project.value == null) {
+                    withContext(Dispatchers.IO) {
+                        runCatching {
+                            val json = session.api.projects()
+                            lyreProjectsFromJson(json).firstOrNull { it.boardId == boundId }
+                        }.getOrNull()?.let { session.bindProject(it) }
+                    }
+                }
                 loading = false
                 return@LaunchedEffect
             }
@@ -112,6 +123,7 @@ fun LyrePane(
                     return@runCatching LoadResult(
                         board = LyreBoardCodec.decode(local),
                         boardId = odysseus.boardId,
+                        project = odysseus,
                     )
                 }
                 val boardJson = session.api.board(odysseus.boardId)
@@ -123,7 +135,7 @@ fun LyrePane(
                 val data = boardJson.optJSONObject("data") ?: JSONObject()
                 session.cache.writeBoardJson(odysseus.boardId, data)
                 val decoded = LyreBoardCodec.decode(data)
-                LoadResult(board = decoded, boardId = odysseus.boardId)
+                LoadResult(board = decoded, boardId = odysseus.boardId, project = odysseus)
             }.getOrElse { LoadResult(error = it.message ?: "request_failed") }
         }
         if (result.board != null && result.boardId != null) {
@@ -136,6 +148,7 @@ fun LyrePane(
             } else if (already != result.boardId || session.board.value == null) {
                 session.bind(result.boardId, result.board)
             }
+            result.project?.let { session.bindProject(it) }
         }
         error = result.error
         loading = false
@@ -176,6 +189,12 @@ fun LyrePane(
                 onBack = { goBack() },
                 onApply = { session.apply(it) },
                 busy = busy != null,
+                project = project,
+                watchBusy = watchBusy,
+                watchError = watchError,
+                watchApi = session.api,
+                onPublish = { session.publish(it) },
+                onInsertAudioUri = { frameId, uri, name -> session.insertAudioUri(frameId, uri, name) },
             )
         }
         else -> {
@@ -219,5 +238,6 @@ private fun LyreLoadBar(onBack: () -> Unit) {
 private data class LoadResult(
     val board: BoardData? = null,
     val boardId: String? = null,
+    val project: LyreProject? = null,
     val error: String? = null,
 )

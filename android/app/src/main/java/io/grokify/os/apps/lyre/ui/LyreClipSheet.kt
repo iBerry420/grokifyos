@@ -1,5 +1,6 @@
 package io.grokify.os.apps.lyre.ui
 
+import android.widget.Toast
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -19,16 +20,21 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.grokify.os.apps.lyre.BoardData
 import io.grokify.os.apps.lyre.Frame
 import io.grokify.os.apps.lyre.LayerClip
+import io.grokify.os.apps.lyre.LibraryAudio
 import io.grokify.os.apps.lyre.LyreMovie
 import io.grokify.os.apps.lyre.LyreRules
 import io.grokify.os.apps.lyre.RuleResult
 import io.grokify.os.ui.theme.GrokifyColors
+
+/** PR 5 mix test compiled; never device-run (`adb devices` empty). */
+internal const val LYRE_BURN_AUDIO_DEVICE_GREEN = false
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -40,17 +46,23 @@ fun LyreClipSheet(
     nativeAtSec: Double? = null,
     enabled: Boolean = true,
     onApply: (RuleResult) -> Unit = {},
+    onPickAudio: (() -> Unit)? = null,
+    onPickAudioFile: (() -> Unit)? = null,
+    onPickLibraryAudio: ((LibraryAudio) -> Unit)? = null,
     onDismiss: () -> Unit,
 ) {
+    val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var tab by remember {
         mutableStateOf(
             if (preferClip || frame.videoSrc.isNullOrEmpty()) "clip" else "picture",
         )
     }
+    val leftoverFrame = !LyreMovie.frameInMovie(board.movie, board.videoLayers, frame.id)
     val canStitch = clip != null &&
         LyreMovie.canStitchClip(clip.id, clip.src, board.videoLayers, board.movie)
     val canPop = (board.movie?.parts?.size ?: 0) > 1
+    val canBurn = board.movie != null && board.audioLayers.any { it.clips.isNotEmpty() }
 
     fun run(result: RuleResult) {
         if (!enabled) return
@@ -124,11 +136,52 @@ fun LyreClipSheet(
                         SheetChip("Mute", selected = false, onClick = {
                             run(LyreRules.mute(board, clip.id))
                         })
+                        SheetChip("Extract", selected = false, onClick = {
+                            run(LyreRules.extractAudio(board, clip.id))
+                        })
                         SheetChip("Restore", selected = false, onClick = {
                             run(LyreRules.restoreClip(board, clip.id))
                         })
                         SheetChip("Remove", selected = false, onClick = {
                             run(LyreRules.removeClip(board, clip.id))
+                        })
+                    }
+                    if (leftoverFrame && onPickAudio != null) {
+                        SheetChip("Audio", selected = false, onClick = {
+                            if (!enabled) return@SheetChip
+                            onPickAudio()
+                            onDismiss()
+                        })
+                    }
+                    if (leftoverFrame && onPickAudioFile != null) {
+                        SheetChip("Files", selected = false, onClick = {
+                            if (!enabled) return@SheetChip
+                            onPickAudioFile()
+                            onDismiss()
+                        })
+                    }
+                    if (leftoverFrame && onPickLibraryAudio != null) {
+                        board.libraryAudio.filter { it.deletedAt == null && it.src.isNotEmpty() }
+                            .forEach { item ->
+                                SheetChip(item.name.ifBlank { "Library" }, selected = false, onClick = {
+                                    if (!enabled) return@SheetChip
+                                    onPickLibraryAudio(item)
+                                    onDismiss()
+                                })
+                            }
+                    }
+                    if (canBurn) {
+                        SheetChip("Burn", selected = false, onClick = {
+                            if (!enabled) return@SheetChip
+                            if (!LYRE_BURN_AUDIO_DEVICE_GREEN) {
+                                Toast.makeText(
+                                    context,
+                                    "Burn-audio mix isn't device-green",
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                                return@SheetChip
+                            }
+                            run(LyreRules.burnAudio(board))
                         })
                     }
                 } else {
