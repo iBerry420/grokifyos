@@ -28,6 +28,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.grokify.os.GrokifyApp
+import io.grokify.os.apps.lyre.ui.LyreEditor
 import io.grokify.os.apps.plugin.BuiltinPluginCatalog
 import io.grokify.os.apps.plugin.PluginFaviconImage
 import io.grokify.os.apps.plugin.PluginIconKey
@@ -60,7 +61,8 @@ fun LyrePane(
 
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
-    var boardTitle by remember { mutableStateOf<String?>(null) }
+    var board by remember { mutableStateOf<BoardData?>(null) }
+    var boardId by remember { mutableStateOf<String?>(null) }
 
     BackHandler(onBack = onBack)
     LaunchedEffect(Unit) {
@@ -85,44 +87,22 @@ fun LyrePane(
                 }
                 val data = boardJson.optJSONObject("data") ?: JSONObject()
                 cache.writeBoardJson(odysseus.boardId, data)
-                val board = LyreBoardCodec.decode(data)
-                LoadResult(title = board.title.ifBlank { odysseus.name })
+                val decoded = LyreBoardCodec.decode(data)
+                LoadResult(board = decoded, boardId = odysseus.boardId)
             }.getOrElse { LoadResult(error = it.message ?: "request_failed") }
         }
-        boardTitle = result.title
+        board = result.board
+        boardId = result.boardId
         error = result.error
         loading = false
     }
 
-    Column(Modifier.fillMaxSize()) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconButton(onClick = onBack) {
-                Icon(
-                    Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "Back",
-                    tint = GrokifyColors.TextPrimary,
-                )
-            }
-            PluginFaviconImage(
-                pluginId = BuiltinPluginCatalog.LYRE,
-                fallback = PluginIconKey.Lyre,
-                modifier = Modifier.size(28.dp),
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                "LYRE",
-                color = GrokifyColors.TextPrimary,
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 17.sp,
-            )
-        }
-        when {
-            loading -> {
+    val loaded = board
+    val loadedId = boardId
+    when {
+        loading -> {
+            Column(Modifier.fillMaxSize()) {
+                LyreLoadBar(onBack)
                 CircularProgressIndicator(
                     modifier = Modifier
                         .padding(horizontal = 20.dp, vertical = 16.dp)
@@ -131,7 +111,10 @@ fun LyrePane(
                     strokeWidth = 2.dp,
                 )
             }
-            error != null -> {
+        }
+        error != null -> {
+            Column(Modifier.fillMaxSize()) {
+                LyreLoadBar(onBack)
                 Text(
                     error ?: "",
                     color = GrokifyColors.GlowRose,
@@ -139,19 +122,56 @@ fun LyrePane(
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
                 )
             }
-            else -> {
-                Text(
-                    boardTitle ?: "",
-                    color = GrokifyColors.TextPrimary,
-                    fontSize = 14.sp,
-                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-                )
+        }
+        loaded != null && loadedId != null -> {
+            LyreEditor(
+                board = loaded,
+                boardId = loadedId,
+                cache = cache,
+                store = store,
+                onBack = onBack,
+            )
+        }
+        else -> {
+            Column(Modifier.fillMaxSize()) {
+                LyreLoadBar(onBack)
             }
         }
     }
 }
 
+@Composable
+private fun LyreLoadBar(onBack: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 4.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = onBack) {
+            Icon(
+                Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = "Back",
+                tint = GrokifyColors.TextPrimary,
+            )
+        }
+        PluginFaviconImage(
+            pluginId = BuiltinPluginCatalog.LYRE,
+            fallback = PluginIconKey.Lyre,
+            modifier = Modifier.size(28.dp),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            "LYRE",
+            color = GrokifyColors.TextPrimary,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 17.sp,
+        )
+    }
+}
+
 private data class LoadResult(
-    val title: String? = null,
+    val board: BoardData? = null,
+    val boardId: String? = null,
     val error: String? = null,
 )
