@@ -7,6 +7,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.net.URLEncoder
@@ -50,6 +51,92 @@ class LyreApi(private val tokenProvider: () -> String?) {
         val req = auth("/lyre.php?action=storage_get&key=$encoded").get().build()
         return streamClient.newCall(req).execute()
     }
+
+    fun imagineStill(
+        projectId: String,
+        boardId: String,
+        frameId: String,
+        prompt: String,
+        images: List<LyreInlineImage>,
+    ): JSONObject {
+        val arr = JSONArray()
+        for (img in images.take(LyreImagine.MAX_IMAGES)) {
+            arr.put(JSONObject().put("data", img.data).put("mimeType", img.mimeType))
+        }
+        return post(
+            JSONObject()
+                .put("action", "imagine_still")
+                .put("project_id", projectId)
+                .put("board_id", boardId)
+                .put("frame_id", frameId)
+                .put("prompt", prompt)
+                .put("images", arr),
+        )
+    }
+
+    fun imagineVideo(
+        projectId: String,
+        boardId: String,
+        prompt: String,
+        duration: Int,
+        aspect: String,
+        resolution: String,
+        imageKey: String,
+        refKeys: List<String>,
+        voiceIds: List<String>,
+    ): JSONObject {
+        val refs = JSONArray()
+        for (key in refKeys.take(LyreImagine.MAX_REFS)) refs.put(key)
+        val voices = JSONArray()
+        for (id in voiceIds.take(LyreImagine.MAX_VOICES)) voices.put(id)
+        return post(
+            JSONObject()
+                .put("action", "imagine_video")
+                .put("project_id", projectId)
+                .put("board_id", boardId)
+                .put("prompt", prompt)
+                .put("duration", duration)
+                .put("aspect", aspect)
+                .put("resolution", resolution)
+                .put("image_key", imageKey)
+                .put("ref_keys", refs)
+                .put("voice_ids", voices),
+        )
+    }
+
+    fun imagineEdit(
+        projectId: String,
+        boardId: String,
+        prompt: String,
+        duration: Int,
+        aspect: String,
+        resolution: String,
+        videoKey: String,
+        imageKey: String?,
+        refKeys: List<String>,
+        voiceIds: List<String>,
+    ): JSONObject {
+        val refs = JSONArray()
+        for (key in refKeys.take(LyreImagine.MAX_REFS)) refs.put(key)
+        val voices = JSONArray()
+        for (id in voiceIds.take(LyreImagine.MAX_VOICES)) voices.put(id)
+        val body = JSONObject()
+            .put("action", "imagine_edit")
+            .put("project_id", projectId)
+            .put("board_id", boardId)
+            .put("prompt", prompt)
+            .put("duration", duration)
+            .put("aspect", aspect)
+            .put("resolution", resolution)
+            .put("video_key", videoKey)
+            .put("ref_keys", refs)
+            .put("voice_ids", voices)
+        if (!imageKey.isNullOrBlank()) body.put("image_key", imageKey)
+        return post(body)
+    }
+
+    fun imagineStatus(requestId: String): JSONObject =
+        get("imagine_status&request_id=" + enc(requestId))
 
     /** Raw POST on streamClient; key query-encoded. JSON metadata only on the response. Never gos_json_body / never PUT. */
     fun putStorage(key: String, file: File): JSONObject {

@@ -128,6 +128,70 @@ class LyreRulesTest {
     }
 
     @Test
+    fun insertStillAndAttachClipLeftoverOnly() {
+        val unstitched = fixture("unstitched")
+        val incoming = Frame(
+            id = "fr_x",
+            src = "boards/lyre/frames/fr_x.jpg",
+            caption = "X",
+            durationSec = 2.0,
+        )
+        val prefix = LyreRules.insertLeftover(unstitched, "fr_a", incoming, null)
+        assertNull(prefix.plan)
+        assertSame(unstitched, prefix.board)
+
+        val still = LyreRules.insertLeftover(unstitched, "fr_b", incoming, null)
+        assertEquals("fr_x", still.board.scenes[0].frames[3].id)
+        assertFalse(
+            LyreMovie.frameInMovie(still.board.movie, still.board.videoLayers, "fr_x"),
+        )
+
+        val movieStill = LyreRules.setStill(unstitched, "fr_a", "boards/lyre/frames/new.jpg")
+        assertSame(unstitched, movieStill.board)
+
+        val holdStill = LyreRules.setStill(unstitched, "fr_hold", "boards/lyre/frames/hold2.jpg")
+        assertEquals("boards/lyre/frames/hold2.jpg", frameOf(holdStill.board, "fr_hold").src)
+        assertEquals(
+            "boards/lyre/frames/fr_hold.jpg",
+            frameOf(holdStill.board, "fr_hold").extra?.optString("origSrc"),
+        )
+        assertNull(frameOf(holdStill.board, "fr_hold").generatingError)
+
+        val movieClip = LyreRules.attachClip(unstitched, "fr_a", "boards/lyre/clips/new.mp4", 6.0, 24.0)
+        assertSame(unstitched, movieClip.board)
+
+        val created = LyreRules.attachClip(unstitched, "fr_hold", "boards/lyre/clips/hold.mp4", 6.0, 24.0)
+        val hold = frameOf(created.board, "fr_hold")
+        assertEquals("boards/lyre/clips/hold.mp4", hold.videoSrc)
+        val linked = created.board.videoLayers.flatMap { it.clips }.first { it.linkedFrameId == "fr_hold" }
+        assertEquals(hold.videoSrc, linked.src)
+        assertDualWrite(created.board)
+
+        val replaced = LyreRules.attachClip(unstitched, "fr_b", "boards/lyre/clips/lc_b_gen.mp4", 6.0, 24.0)
+        val clip = clipOf(replaced.board, "lc_b")
+        assertEquals("boards/lyre/clips/lc_b_gen.mp4", clip.src)
+        assertEquals("boards/lyre/clips/lc_b.mp4", clip.origSrc)
+        assertEquals(clip.src, frameOf(replaced.board, "fr_b").videoSrc)
+        assertNull(frameOf(replaced.board, "fr_b").videoGeneratingError)
+        assertDualWrite(replaced.board)
+    }
+
+    @Test
+    fun patchLeftoverErrorLeavesMoviePrefix() {
+        val unstitched = fixture("unstitched")
+        val movie = LyreRules.patchLeftoverFrame(unstitched, "fr_a") {
+            it.copy(generatingError = "offline")
+        }
+        assertSame(unstitched, movie.board)
+        val leftover = LyreRules.patchLeftoverFrame(unstitched, "fr_hold") {
+            it.copy(generatingError = "offline", videoGeneratingError = "edit_unavailable")
+        }
+        assertEquals("offline", frameOf(leftover.board, "fr_hold").generatingError)
+        assertEquals("edit_unavailable", frameOf(leftover.board, "fr_hold").videoGeneratingError)
+        assertNull(frameOf(leftover.board, "fr_a").generatingError)
+    }
+
+    @Test
     fun muteLeftoverDualWritesWithoutAudioRail() {
         val unstitched = fixture("unstitched")
         val muted = LyreRules.mute(unstitched, "lc_b")

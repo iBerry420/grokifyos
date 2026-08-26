@@ -101,6 +101,29 @@ fun LyreEditor(
     onBack: () -> Unit,
     onApply: (RuleResult) -> Unit = {},
     busy: Boolean = false,
+    imagineBusy: Boolean = false,
+    onGenerateStill: (frameId: String, prompt: String, refs: List<String>, aspect: String) -> Unit = { _, _, _, _ -> },
+    onGenerateClip: (
+        frameId: String,
+        prompt: String,
+        duration: Int,
+        aspect: String,
+        resolution: String,
+        refs: List<String>,
+        voices: List<String>,
+    ) -> Unit = { _, _, _, _, _, _, _ -> },
+    onEditClip: (
+        frameId: String,
+        prompt: String,
+        duration: Int,
+        aspect: String,
+        resolution: String,
+        refs: List<String>,
+        voices: List<String>,
+    ) -> Unit = { _, _, _, _, _, _, _ -> },
+    onImportUri: (afterFrameId: String?, uri: android.net.Uri) -> Unit = { _, _ -> },
+    onImportFile: (afterFrameId: String?, file: File, mime: String) -> Unit = { _, _, _ -> },
+    onAddRef: (frameId: String, uri: android.net.Uri) -> Unit = { _, _ -> },
 ) {
     val context = LocalContext.current
     val player = remember { LyrePlayer(context.applicationContext) }
@@ -403,7 +426,13 @@ fun LyreEditor(
 
     val sheet = clipSheet
     if (sheet != null) {
-        val nativeAt = sheet.clip?.let { clip ->
+        val liveFrame = board.scenes.asSequence().flatMap { it.frames.asSequence() }
+            .firstOrNull { it.id == sheet.frame.id } ?: sheet.frame
+        val liveClip = board.videoLayers.asSequence().flatMap { it.clips.asSequence() }
+            .firstOrNull { clip -> sheet.clip != null && clip.id == sheet.clip.id }
+            ?: board.videoLayers.asSequence().flatMap { it.clips.asSequence() }
+                .firstOrNull { it.linkedFrameId == liveFrame.id }
+        val nativeAt = liveClip?.let { clip ->
             val target = lyreClockTarget(board, playhead.toDouble())
             if (target is LyreClockTarget.Leftover && target.clipId == clip.id) {
                 val win = LyreClip.presentedVideoWindow(clip)
@@ -414,12 +443,27 @@ fun LyreEditor(
         }
         LyreClipSheet(
             board = board,
-            frame = sheet.frame,
-            clip = sheet.clip,
+            boardId = boardId,
+            cache = cache,
+            frame = liveFrame,
+            clip = liveClip,
             preferClip = sheet.preferClip,
             nativeAtSec = nativeAt,
             enabled = !busy,
+            imagineBusy = imagineBusy,
             onApply = onApply,
+            onGenerateStill = { prompt, refs, aspect ->
+                onGenerateStill(liveFrame.id, prompt, refs, aspect)
+            },
+            onGenerateClip = { prompt, duration, aspect, resolution, refs, voices ->
+                onGenerateClip(liveFrame.id, prompt, duration, aspect, resolution, refs, voices)
+            },
+            onEditClip = { prompt, duration, aspect, resolution, refs, voices ->
+                onEditClip(liveFrame.id, prompt, duration, aspect, resolution, refs, voices)
+            },
+            onImportUri = { uri -> onImportUri(liveFrame.id, uri) },
+            onImportFile = { file, mime -> onImportFile(liveFrame.id, file, mime) },
+            onAddRef = { uri -> onAddRef(liveFrame.id, uri) },
             onDismiss = { clipSheet = null },
         )
     }

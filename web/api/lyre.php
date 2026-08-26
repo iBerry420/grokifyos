@@ -672,6 +672,601 @@ function gos_lyre_post_save_board(array $access, array $body): never
     gos_api_json(['ok' => true, 'board_id' => $target]);
 }
 
+function gos_lyre_me_api_base(): string
+{
+    return rtrim((string) (gos_env('GROKIFY_LYRE_ME_API_BASE', 'https://me.grokpot.io/v1') ?? ''), '/');
+}
+
+function gos_lyre_me_storage_base(): string
+{
+    return rtrim((string) (gos_env('GROKIFY_LYRE_ME_STORAGE_BASE', 'https://me.grokpot.io/v1/storage') ?? ''), '/');
+}
+
+function gos_lyre_me_api_key(): string
+{
+    return (string) (gos_env('GROKIFY_LYRE_ME_API_KEY', '') ?? '');
+}
+
+function gos_lyre_me_object_url(string $key): string
+{
+    return gos_lyre_me_storage_base() . '/' . implode('/', array_map('rawurlencode', explode('/', $key)));
+}
+
+/** @return array{status:int, body:string, content_type:string} */
+function gos_lyre_me_http(string $method, string $url, ?string $body, int $timeout, array $extraHeaders = []): array
+{
+    $apiKey = gos_lyre_me_api_key();
+    if ($apiKey === '' || $url === '') {
+        return ['status' => 0, 'body' => '', 'content_type' => ''];
+    }
+    if (!function_exists('curl_init')) {
+        return ['status' => 0, 'body' => '', 'content_type' => ''];
+    }
+    $ch = curl_init($url);
+    if ($ch === false) {
+        return ['status' => 0, 'body' => '', 'content_type' => ''];
+    }
+    $headers = array_merge([
+        'Authorization: Bearer ' . $apiKey,
+        'Accept: application/json, text/event-stream, */*',
+    ], $extraHeaders);
+    $opts = [
+        CURLOPT_CUSTOMREQUEST => $method,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_CONNECTTIMEOUT => 15,
+        CURLOPT_TIMEOUT => $timeout,
+        CURLOPT_HTTPHEADER => $headers,
+    ];
+    if ($body !== null) {
+        $opts[CURLOPT_POSTFIELDS] = $body;
+        $hasCt = false;
+        foreach ($headers as $h) {
+            if (stripos($h, 'Content-Type:') === 0) {
+                $hasCt = true;
+                break;
+            }
+        }
+        if (!$hasCt) {
+            $headers[] = 'Content-Type: application/json';
+            $opts[CURLOPT_HTTPHEADER] = $headers;
+        }
+    }
+    curl_setopt_array($ch, $opts);
+    $raw = curl_exec($ch);
+    $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $ctype = (string) curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
+    curl_close($ch);
+    return [
+        'status' => $status,
+        'body' => is_string($raw) ? $raw : '',
+        'content_type' => $ctype,
+    ];
+}
+
+function gos_lyre_me_object_exists(string $key): bool
+{
+    $url = gos_lyre_me_object_url($key);
+    $apiKey = gos_lyre_me_api_key();
+    if ($apiKey === '' || $url === '' || !function_exists('curl_init')) {
+        return false;
+    }
+    $ch = curl_init($url);
+    if ($ch === false) {
+        return false;
+    }
+    $status = 0;
+    curl_setopt_array($ch, [
+        CURLOPT_HTTPGET => true,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_CONNECTTIMEOUT => 15,
+        CURLOPT_TIMEOUT => 30,
+        CURLOPT_HTTPHEADER => [
+            'Authorization: Bearer ' . $apiKey,
+            'Range: bytes=0-0',
+        ],
+        CURLOPT_HEADERFUNCTION => static function ($ch, string $header) use (&$status): int {
+            if (preg_match('#^HTTP/\S+\s+(\d+)#', $header, $m) === 1) {
+                $status = (int) $m[1];
+            }
+            return strlen($header);
+        },
+        CURLOPT_WRITEFUNCTION => static function ($ch, string $data): int {
+            return 0;
+        },
+    ]);
+    curl_exec($ch);
+    curl_close($ch);
+    return $status === 200 || $status === 206;
+}
+
+function gos_lyre_me_put_bytes(string $key, string $bytes, string $ctype): bool
+{
+    if ($bytes === '') {
+        return false;
+    }
+    $res = gos_lyre_me_http('POST', gos_lyre_me_object_url($key), $bytes, 120, [
+        'Content-Type: ' . $ctype,
+        'Content-Length: ' . (string) strlen($bytes),
+    ]);
+    return $res['status'] >= 200 && $res['status'] < 300;
+}
+
+function gos_lyre_harvest_image_url(string $text): ?string
+{
+    if ($text === '') {
+        return null;
+    }
+    if (preg_match('/!\[[^\]]*]\((https?:\/\/[^)\s]+)\)/i', $text, $m) === 1) {
+        return $m[1];
+    }
+    if (preg_match('/https?:\/\/[^\s"\'<>]+?\.(?:png|jpe?g|webp|gif)(?:\?[^\s"\'<>]*)?/i', $text, $m) === 1) {
+        return $m[0];
+    }
+    if (preg_match('#(?:/v1/storage/|boards/)[A-Za-z0-9_./%-]+\.(?:png|jpe?g|webp|gif)#i', $text, $m) === 1) {
+        $path = $m[0];
+        if (str_starts_with($path, 'http')) {
+            return $path;
+        }
+        if (str_starts_with($path, '/v1/storage/')) {
+            $site = (string) preg_replace('#/v1$#', '', gos_lyre_me_api_base());
+            return $site . $path;
+        }
+        return gos_lyre_me_object_url(ltrim($path, '/'));
+    }
+    return null;
+}
+
+/** @param mixed $data */
+function gos_lyre_harvest_from_json($data): ?string
+{
+    if (is_string($data)) {
+        return gos_lyre_harvest_image_url($data);
+    }
+    if (!is_array($data)) {
+        return null;
+    }
+    foreach (['url', 'path', 'content', 'image'] as $k) {
+        if (!array_key_exists($k, $data)) {
+            continue;
+        }
+        $v = $data[$k];
+        if (is_string($v)) {
+            $found = gos_lyre_harvest_image_url($v);
+            if ($found !== null) {
+                return $found;
+            }
+            if ($k === 'url' && preg_match('#^https?://#i', $v) === 1) {
+                return $v;
+            }
+            if ($k === 'path' && $v !== '') {
+                return str_starts_with($v, 'http') ? $v : gos_lyre_me_object_url(ltrim($v, '/'));
+            }
+        } elseif (is_array($v)) {
+            $found = gos_lyre_harvest_from_json($v);
+            if ($found !== null) {
+                return $found;
+            }
+        }
+    }
+    if (isset($data['media']) && is_array($data['media'])) {
+        $found = gos_lyre_harvest_from_json($data['media']);
+        if ($found !== null) {
+            return $found;
+        }
+    }
+    return null;
+}
+
+function gos_lyre_harvest_sse(string $sse): ?string
+{
+    $found = null;
+    $event = '';
+    foreach (preg_split("/\r\n|\n|\r/", $sse) ?: [] as $line) {
+        if (str_starts_with($line, 'event:')) {
+            $event = trim(substr($line, 6));
+            continue;
+        }
+        if (!str_starts_with($line, 'data:')) {
+            continue;
+        }
+        $payload = trim(substr($line, 5));
+        if ($payload === '' || $payload === '[DONE]') {
+            continue;
+        }
+        $json = json_decode($payload, true);
+        if (is_array($json)) {
+            $hit = gos_lyre_harvest_from_json($json);
+            if ($hit !== null) {
+                $found = $hit;
+            }
+            if ($event === 'media' || ($json['type'] ?? '') === 'media') {
+                $media = gos_lyre_harvest_from_json($json);
+                if ($media !== null) {
+                    $found = $media;
+                }
+            }
+        } else {
+            $hit = gos_lyre_harvest_image_url($payload);
+            if ($hit !== null) {
+                $found = $hit;
+            }
+        }
+    }
+    if ($found === null) {
+        $found = gos_lyre_harvest_image_url($sse);
+    }
+    return $found;
+}
+
+function gos_lyre_download_url(string $url): ?string
+{
+    if ($url === '') {
+        return null;
+    }
+    if (!function_exists('curl_init')) {
+        return null;
+    }
+    $ch = curl_init($url);
+    if ($ch === false) {
+        return null;
+    }
+    $headers = ['Accept: */*'];
+    if (str_contains($url, 'me.grokpot.io')) {
+        $headers[] = 'Authorization: Bearer ' . gos_lyre_me_api_key();
+    }
+    curl_setopt_array($ch, [
+        CURLOPT_HTTPGET => true,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_MAXREDIRS => 5,
+        CURLOPT_CONNECTTIMEOUT => 15,
+        CURLOPT_TIMEOUT => 60,
+        CURLOPT_HTTPHEADER => $headers,
+    ]);
+    $raw = curl_exec($ch);
+    $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    if ($status !== 200 || !is_string($raw) || $raw === '') {
+        return null;
+    }
+    return $raw;
+}
+
+function gos_lyre_inline_images(array $body): array
+{
+    $out = [];
+    $raw = $body['images'] ?? [];
+    if (!is_array($raw)) {
+        return $out;
+    }
+    foreach ($raw as $img) {
+        if (!is_array($img)) {
+            continue;
+        }
+        $data = (string) ($img['data'] ?? $img['base64'] ?? '');
+        $mime = (string) ($img['mimeType'] ?? $img['mime'] ?? 'image/jpeg');
+        if (str_starts_with($data, 'data:')) {
+            if (preg_match('#^data:([^;]+);base64,(.+)$#', $data, $m) === 1) {
+                $mime = $m[1];
+                $data = $m[2];
+            }
+        }
+        if ($data === '') {
+            continue;
+        }
+        if ($mime === '') {
+            $mime = 'image/jpeg';
+        }
+        $out[] = ['data' => $data, 'mimeType' => $mime];
+        if (count($out) >= 4) {
+            break;
+        }
+    }
+    return $out;
+}
+
+function gos_lyre_imagine_project(array $access, array $body): array
+{
+    $userId = gos_lyre_user_id($access);
+    $mysql = gos_lyre_mysql();
+    $id = trim((string) ($body['project_id'] ?? $body['id'] ?? ''));
+    $boardId = trim((string) ($body['board_id'] ?? ''));
+    $row = null;
+    if ($id !== '') {
+        $row = gos_lyre_project_by_id($mysql, $userId, $id);
+        if ($row === null) {
+            $row = gos_lyre_project_by_board($mysql, $userId, $id);
+        }
+    }
+    if ($row === null && $boardId !== '') {
+        $row = gos_lyre_project_by_board($mysql, $userId, $boardId);
+    }
+    if ($row === null) {
+        gos_api_json(['ok' => false, 'error' => 'not_found'], 404);
+    }
+    return $row;
+}
+
+function gos_lyre_imagine_unavailable(): never
+{
+    gos_api_json(['ok' => false, 'error' => 'grokme_unavailable'], 502);
+}
+
+function gos_lyre_imagine_still(array $access, array $body): never
+{
+    if (gos_lyre_me_api_key() === '' || gos_lyre_me_api_base() === '') {
+        gos_lyre_imagine_unavailable();
+    }
+    $row = gos_lyre_imagine_project($access, $body);
+    $boardId = (string) $row['board_id'];
+    $frameId = trim((string) ($body['frame_id'] ?? ''));
+    if (preg_match('/^[A-Za-z0-9_-]{1,64}$/', $frameId) !== 1) {
+        gos_api_json(['ok' => false, 'error' => 'frame_id_required'], 400);
+    }
+    $prompt = trim((string) ($body['prompt'] ?? ''));
+    $images = gos_lyre_inline_images($body);
+    $message = "Call `image_gen` / `image_edit` once. Do not search the web.\n\n" . $prompt;
+    if (function_exists('set_time_limit')) {
+        set_time_limit(120);
+    }
+
+    $apiBase = gos_lyre_me_api_base();
+    $imageJson = json_encode([
+        'prompt' => $prompt,
+        'images' => $images,
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $best = gos_lyre_me_http('POST', $apiBase . '/imagine/image', is_string($imageJson) ? $imageJson : '{}', 20);
+    $url = null;
+    if ($best['status'] !== 404 && $best['status'] !== 0 && $best['status'] !== 405) {
+        $decoded = json_decode($best['body'], true);
+        if (is_array($decoded)) {
+            $url = gos_lyre_harvest_from_json($decoded);
+        }
+        if ($url === null) {
+            $url = gos_lyre_harvest_image_url($best['body']);
+        }
+    }
+    if ($url === null) {
+        $chatPayload = [
+            'message' => $message,
+            'images' => $images,
+            'stream' => true,
+        ];
+        $chatJson = json_encode($chatPayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        $chat = gos_lyre_me_http('POST', $apiBase . '/chat', is_string($chatJson) ? $chatJson : '{}', 120);
+        if ($chat['status'] < 200 || $chat['status'] >= 300 || $chat['body'] === '') {
+            gos_lyre_imagine_unavailable();
+        }
+        $url = gos_lyre_harvest_sse($chat['body']);
+    }
+    if ($url === null) {
+        gos_lyre_imagine_unavailable();
+    }
+    $bytes = gos_lyre_download_url($url);
+    if ($bytes === null || $bytes === '') {
+        gos_lyre_imagine_unavailable();
+    }
+    $key = 'boards/' . $boardId . '/frames/' . $frameId . '.jpg';
+    $allow = gos_lyre_storage_key($key);
+    if ($allow === null) {
+        gos_api_json(['ok' => false, 'error' => 'invalid_key'], 400);
+    }
+    if (!gos_lyre_me_put_bytes($allow, $bytes, 'image/jpeg')) {
+        gos_lyre_imagine_unavailable();
+    }
+    gos_api_json([
+        'ok' => true,
+        'path' => $allow,
+        'url' => gos_lyre_me_object_url($allow),
+    ]);
+}
+
+function gos_lyre_imagine_video(array $access, array $body): never
+{
+    if (gos_lyre_me_api_key() === '' || gos_lyre_me_api_base() === '') {
+        gos_lyre_imagine_unavailable();
+    }
+    gos_lyre_imagine_project($access, $body);
+    $imageKey = gos_lyre_storage_key((string) ($body['image_key'] ?? ''));
+    if ($imageKey === null) {
+        gos_api_json(['ok' => false, 'error' => 'image_key_required'], 400);
+    }
+    if (!gos_lyre_me_object_exists($imageKey)) {
+        gos_lyre_imagine_unavailable();
+    }
+    $refKeys = [];
+    $rawRefs = $body['ref_keys'] ?? [];
+    if (is_array($rawRefs)) {
+        foreach ($rawRefs as $rk) {
+            $key = gos_lyre_storage_key((string) $rk);
+            if ($key === null) {
+                gos_lyre_imagine_unavailable();
+            }
+            if (!gos_lyre_me_object_exists($key)) {
+                gos_lyre_imagine_unavailable();
+            }
+            $refKeys[] = $key;
+            if (count($refKeys) >= 3) {
+                break;
+            }
+        }
+    }
+    $voices = [];
+    $rawVoices = $body['voice_ids'] ?? [];
+    if (is_array($rawVoices)) {
+        foreach ($rawVoices as $v) {
+            $id = strtolower(trim((string) $v));
+            if ($id === '') {
+                continue;
+            }
+            $voices[] = ['voice_id' => $id];
+            if (count($voices) >= 3) {
+                break;
+            }
+        }
+    }
+    $payload = [
+        'prompt' => (string) ($body['prompt'] ?? ''),
+        'duration' => (int) ($body['duration'] ?? 6),
+        'aspect_ratio' => (string) ($body['aspect'] ?? $body['aspect_ratio'] ?? '16:9'),
+        'resolution' => (string) ($body['resolution'] ?? '720p'),
+        'image' => ['url' => gos_lyre_me_object_url($imageKey)],
+    ];
+    if ($refKeys !== []) {
+        $payload['reference_images'] = array_map(
+            static fn(string $k): array => ['url' => gos_lyre_me_object_url($k)],
+            $refKeys
+        );
+    }
+    if ($voices !== []) {
+        $payload['reference_audios'] = $voices;
+    }
+    $json = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $res = gos_lyre_me_http(
+        'POST',
+        gos_lyre_me_api_base() . '/imagine/video',
+        is_string($json) ? $json : '{}',
+        30
+    );
+    if ($res['status'] === 404 || $res['status'] === 0 || $res['status'] === 405) {
+        gos_lyre_imagine_unavailable();
+    }
+    $decoded = json_decode($res['body'], true);
+    $requestId = '';
+    if (is_array($decoded)) {
+        $requestId = trim((string) ($decoded['request_id'] ?? $decoded['id'] ?? ''));
+    }
+    if ($res['status'] < 200 || $res['status'] >= 300 || $requestId === '') {
+        gos_lyre_imagine_unavailable();
+    }
+    gos_api_json(['ok' => true, 'request_id' => $requestId]);
+}
+
+function gos_lyre_imagine_edit(array $access, array $body): never
+{
+    if (gos_lyre_me_api_key() === '' || gos_lyre_me_api_base() === '') {
+        gos_lyre_imagine_unavailable();
+    }
+    gos_lyre_imagine_project($access, $body);
+    $videoKey = gos_lyre_storage_key((string) ($body['video_key'] ?? ''));
+    if ($videoKey === null) {
+        gos_api_json(['ok' => false, 'error' => 'video_key_required'], 400);
+    }
+    if (!gos_lyre_me_object_exists($videoKey)) {
+        gos_lyre_imagine_unavailable();
+    }
+    $imageKey = null;
+    $rawImage = trim((string) ($body['image_key'] ?? ''));
+    if ($rawImage !== '') {
+        $imageKey = gos_lyre_storage_key($rawImage);
+        if ($imageKey === null || !gos_lyre_me_object_exists($imageKey)) {
+            gos_lyre_imagine_unavailable();
+        }
+    }
+    $refKeys = [];
+    $rawRefs = $body['ref_keys'] ?? [];
+    if (is_array($rawRefs)) {
+        foreach ($rawRefs as $rk) {
+            $key = gos_lyre_storage_key((string) $rk);
+            if ($key === null || !gos_lyre_me_object_exists($key)) {
+                gos_lyre_imagine_unavailable();
+            }
+            $refKeys[] = $key;
+            if (count($refKeys) >= 3) {
+                break;
+            }
+        }
+    }
+    $voices = [];
+    $rawVoices = $body['voice_ids'] ?? [];
+    if (is_array($rawVoices)) {
+        foreach ($rawVoices as $v) {
+            $vid = strtolower(trim((string) $v));
+            if ($vid === '') {
+                continue;
+            }
+            $voices[] = ['voice_id' => $vid];
+            if (count($voices) >= 3) {
+                break;
+            }
+        }
+    }
+    $payload = [
+        'prompt' => (string) ($body['prompt'] ?? ''),
+        'duration' => (int) ($body['duration'] ?? 6),
+        'aspect_ratio' => (string) ($body['aspect'] ?? $body['aspect_ratio'] ?? '16:9'),
+        'resolution' => (string) ($body['resolution'] ?? '720p'),
+        'video' => ['url' => gos_lyre_me_object_url($videoKey)],
+    ];
+    if ($imageKey !== null) {
+        $payload['image'] = ['url' => gos_lyre_me_object_url($imageKey)];
+    }
+    if ($refKeys !== []) {
+        $payload['reference_images'] = array_map(
+            static fn(string $k): array => ['url' => gos_lyre_me_object_url($k)],
+            $refKeys
+        );
+    }
+    if ($voices !== []) {
+        $payload['reference_audios'] = $voices;
+    }
+    $json = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $apiBase = gos_lyre_me_api_base();
+    $res = gos_lyre_me_http('POST', $apiBase . '/imagine/edit', is_string($json) ? $json : '{}', 30);
+    if ($res['status'] === 404 || $res['status'] === 405 || $res['status'] === 0) {
+        $res = gos_lyre_me_http('POST', $apiBase . '/imagine/video/edit', is_string($json) ? $json : '{}', 30);
+    }
+    if ($res['status'] === 404 || $res['status'] === 0 || $res['status'] === 405) {
+        gos_lyre_imagine_unavailable();
+    }
+    $decoded = json_decode($res['body'], true);
+    $requestId = '';
+    if (is_array($decoded)) {
+        $requestId = trim((string) ($decoded['request_id'] ?? $decoded['id'] ?? ''));
+    }
+    if ($res['status'] < 200 || $res['status'] >= 300 || $requestId === '') {
+        gos_lyre_imagine_unavailable();
+    }
+    gos_api_json(['ok' => true, 'request_id' => $requestId]);
+}
+
+function gos_lyre_imagine_status(array $access, string $requestId): never
+{
+    gos_lyre_user_id($access);
+    $requestId = trim($requestId);
+    if (preg_match('/^[A-Za-z0-9._:-]{8,128}$/', $requestId) !== 1) {
+        gos_api_json(['ok' => false, 'error' => 'request_id_required'], 400);
+    }
+    if (gos_lyre_me_api_key() === '' || gos_lyre_me_api_base() === '') {
+        gos_lyre_imagine_unavailable();
+    }
+    $res = gos_lyre_me_http('GET', gos_lyre_me_api_base() . '/imagine/video/' . rawurlencode($requestId), null, 30);
+    if ($res['status'] === 404 || $res['status'] === 0) {
+        gos_lyre_imagine_unavailable();
+    }
+    $decoded = json_decode($res['body'], true);
+    if (!is_array($decoded)) {
+        gos_lyre_imagine_unavailable();
+    }
+    $status = strtolower((string) ($decoded['status'] ?? 'pending'));
+    $out = [
+        'ok' => true,
+        'status' => $status !== '' ? $status : 'pending',
+        'request_id' => $requestId,
+    ];
+    if (isset($decoded['video']) && is_array($decoded['video'])) {
+        $out['video'] = $decoded['video'];
+    }
+    if (isset($decoded['url'])) {
+        $out['url'] = $decoded['url'];
+    }
+    if (isset($decoded['path'])) {
+        $out['path'] = $decoded['path'];
+    }
+    gos_api_json($out);
+}
+
 $httpMethod = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
 $qsAction = strtolower(trim((string) ($_GET['action'] ?? '')));
 
@@ -682,6 +1277,10 @@ if ($httpMethod === 'GET' && $qsAction === 'storage_get') {
 if ($httpMethod === 'POST' && $qsAction === 'storage_put') {
     gos_lyre_auth();
     gos_lyre_storage_put((string) ($_GET['key'] ?? ''));
+}
+if ($httpMethod === 'GET' && $qsAction === 'imagine_status') {
+    $access = gos_lyre_auth();
+    gos_lyre_imagine_status($access, (string) ($_GET['request_id'] ?? ''));
 }
 if ($httpMethod === 'GET') {
     $access = gos_lyre_auth();
@@ -715,5 +1314,14 @@ if ($action === 'delete') {
 }
 if ($action === 'save_board') {
     gos_lyre_post_save_board($access, $body);
+}
+if ($action === 'imagine_still') {
+    gos_lyre_imagine_still($access, $body);
+}
+if ($action === 'imagine_video') {
+    gos_lyre_imagine_video($access, $body);
+}
+if ($action === 'imagine_edit') {
+    gos_lyre_imagine_edit($access, $body);
 }
 gos_api_json(['ok' => false, 'error' => 'unknown_action'], 400);

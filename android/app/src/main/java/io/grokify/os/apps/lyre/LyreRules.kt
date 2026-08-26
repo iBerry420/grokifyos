@@ -146,33 +146,117 @@ object LyreRules {
     }
 
     fun insertHold(board: BoardData, afterFrameId: String?): RuleResult {
-        if (afterFrameId != null) {
-            val frame = findFrame(board, afterFrameId) ?: return RuleResult(board, null)
-            if (LyreMovie.frameInMovie(board.movie, board.videoLayers, frame.id)) {
-                return RuleResult(board, null)
-            }
-        }
         val hold = Frame(
             id = newId("fr_"),
             src = "",
             caption = "Hold",
             durationSec = 2.0,
         )
-        val scenes = if (afterFrameId == null) {
-            if (board.scenes.isEmpty()) {
-                listOf(emptyScene().copy(frames = listOf(hold)))
-            } else {
-                board.scenes.mapIndexed { i, sc ->
-                    if (i == board.scenes.lastIndex) sc.copy(frames = sc.frames + hold) else sc
-                }
-            }
-        } else {
-            board.scenes.map { sc ->
-                val idx = sc.frames.indexOfFirst { it.id == afterFrameId }
-                if (idx < 0) sc else sc.copy(frames = sc.frames.toMutableList().apply { add(idx + 1, hold) })
+        return insertLeftover(board, afterFrameId, hold, clip = null)
+    }
+
+    /** Leftover-only. Dual-writes [clip] when attached. */
+    fun insertLeftover(
+        board: BoardData,
+        afterFrameId: String?,
+        frame: Frame,
+        clip: LayerClip?,
+    ): RuleResult {
+        if (afterFrameId != null) {
+            val after = findFrame(board, afterFrameId) ?: return RuleResult(board, null)
+            if (LyreMovie.frameInMovie(board.movie, board.videoLayers, after.id)) {
+                return RuleResult(board, null)
             }
         }
-        return RuleResult(retimeLinkedClips(board.copy(scenes = scenes)), null)
+        if (LyreMovie.frameInMovie(board.movie, board.videoLayers, frame.id)) {
+            return RuleResult(board, null)
+        }
+        var next = board.copy(scenes = insertFrameInScenes(board, afterFrameId, frame))
+        if (clip != null) next = appendVideoClip(next, clip)
+        return RuleResult(retimeLinkedClips(next), null)
+    }
+
+    fun setStill(board: BoardData, frameId: String, src: String): RuleResult {
+        val frame = leftoverFrame(board, frameId) ?: return RuleResult(board, null)
+        if (src.isEmpty()) return RuleResult(board, null)
+        if (src == frame.src) {
+            return RuleResult(
+                replaceFrame(board, frame.copy(generating = false, generatingError = null)),
+                null,
+            )
+        }
+        val extra = JSONObject(frame.extra?.toString() ?: "{}")
+        if (frame.src.isNotEmpty()) extra.put("origSrc", frame.src)
+        val next = frame.copy(
+            src = src,
+            extra = extra,
+            generating = false,
+            generatingError = null,
+        )
+        return RuleResult(replaceFrame(board, next), null)
+    }
+
+    fun attachClip(
+        board: BoardData,
+        frameId: String,
+        src: String,
+        durationSec: Double,
+        fps: Double?,
+    ): RuleResult {
+        val frame = leftoverFrame(board, frameId) ?: return RuleResult(board, null)
+        if (src.isEmpty()) return RuleResult(board, null)
+        val existing = board.videoLayers.asSequence()
+            .flatMap { it.clips.asSequence() }
+            .firstOrNull { it.linkedFrameId == frameId }
+        if (existing != null) {
+            if (LyreMovie.clipInMovie(board.movie, existing.id, board.videoLayers)) {
+                return RuleResult(board, null)
+            }
+            val (backed, backedFrame) = withVideoOrig(existing, frame)
+            val nextClip = backed.copy(
+                src = src,
+                durationSec = durationSec,
+                sourceDurationSec = durationSec,
+                trimInSec = 0.0,
+            )
+            val nextFrame = (backedFrame ?: frame).copy(
+                videoSrc = src,
+                videoDurationSec = durationSec,
+                durationSec = durationSec,
+                videoFps = fps,
+                videoInSec = 0.0,
+                videoOutSec = durationSec,
+                videoGenerating = false,
+                videoGeneratingError = null,
+            )
+            return RuleResult(retimeLinkedClips(replaceClipAndFrame(board, nextClip, nextFrame)), null)
+        }
+        val clip = LayerClip(
+            id = newId("lc_"),
+            src = src,
+            name = frame.caption.ifBlank { "Clip" },
+            startSec = 0.0,
+            durationSec = durationSec,
+            sourceDurationSec = durationSec,
+            linkedFrameId = frame.id,
+        )
+        val nextFrame = frame.copy(
+            videoSrc = src,
+            videoDurationSec = durationSec,
+            durationSec = durationSec,
+            videoFps = fps,
+            videoInSec = 0.0,
+            videoOutSec = durationSec,
+            videoGenerating = false,
+            videoGeneratingError = null,
+        )
+        val next = appendVideoClip(replaceFrame(board, nextFrame), clip)
+        return RuleResult(retimeLinkedClips(next), null)
+    }
+
+    fun patchLeftoverFrame(board: BoardData, frameId: String, transform: (Frame) -> Frame): RuleResult {
+        val frame = leftoverFrame(board, frameId) ?: return RuleResult(board, null)
+        return RuleResult(replaceFrame(board, transform(frame)), null)
     }
 
     fun dumpScene(board: BoardData, sceneId: String): RuleResult {
@@ -334,10 +418,45 @@ object LyreRules {
         val frame: Frame,
     )
 
+    internal fun leftoverFrame(board: BoardData, frameId: String): Frame? {
+        val frame = findFrame(board, frameId) ?: return null
+        if (LyreMovie.frameInMovie(board.movie, board.videoLayers, frame.id)) return null
+        return frame
+    }
+
     private fun leftoverVideoClip(board: BoardData, clipId: String): LayerClip? {
         val clip = findVideoClip(board, clipId) ?: return null
         if (LyreMovie.clipInMovie(board.movie, clip.id, board.videoLayers)) return null
         return clip
+    }
+
+    private fun insertFrameInScenes(board: BoardData, afterFrameId: String?, frame: Frame): List<Scene> {
+        return if (afterFrameId == null) {
+            if (board.scenes.isEmpty()) {
+                listOf(emptyScene().copy(frames = listOf(frame)))
+            } else {
+                board.scenes.mapIndexed { i, sc ->
+                    if (i == board.scenes.lastIndex) sc.copy(frames = sc.frames + frame) else sc
+                }
+            }
+        } else {
+            board.scenes.map { sc ->
+                val idx = sc.frames.indexOfFirst { it.id == afterFrameId }
+                if (idx < 0) sc else sc.copy(frames = sc.frames.toMutableList().apply { add(idx + 1, frame) })
+            }
+        }
+    }
+
+    private fun appendVideoClip(board: BoardData, clip: LayerClip): BoardData {
+        val layers = board.videoLayers.toMutableList()
+        val idx = layers.indexOfLast { it.kind == "video" }
+        if (idx < 0) {
+            layers.add(MediaLayer(id = newId("ly_"), kind = "video", name = "Video", clips = listOf(clip)))
+        } else {
+            val layer = layers[idx]
+            layers[idx] = layer.copy(clips = layer.clips + clip)
+        }
+        return board.copy(videoLayers = layers)
     }
 
     private fun findVideoClip(board: BoardData, clipId: String): LayerClip? {
@@ -524,7 +643,7 @@ object LyreRules {
 
     private fun isBurnSrc(src: String): Boolean = src.endsWith("movie.burn.mp4")
 
-    private fun newId(prefix: String): String {
+    internal fun newId(prefix: String): String {
         val hex = UUID.randomUUID().toString().replace("-", "").take(8)
         return prefix + hex
     }

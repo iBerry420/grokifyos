@@ -57,6 +57,7 @@ fun LyrePane(
     val board by session.board.collectAsState()
     val boardId by session.boundBoardId.collectAsState()
     val busy by session.busy.collectAsState()
+    val imagineBusy by session.imagineBusy.collectAsState()
 
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -176,6 +177,19 @@ fun LyrePane(
                 onBack = { goBack() },
                 onApply = { session.apply(it) },
                 busy = busy != null,
+                imagineBusy = imagineBusy,
+                onGenerateStill = { frameId, prompt, refs, aspect ->
+                    session.generateStill(frameId, prompt, refs, aspect)
+                },
+                onGenerateClip = { frameId, prompt, duration, aspect, resolution, refs, voices ->
+                    session.generateClip(frameId, prompt, duration, aspect, resolution, refs, voices)
+                },
+                onEditClip = { frameId, prompt, duration, aspect, resolution, refs, voices ->
+                    session.editClip(frameId, prompt, duration, aspect, resolution, refs, voices)
+                },
+                onImportUri = { afterId, uri -> session.importUri(afterId, uri) },
+                onImportFile = { afterId, file, mime -> session.importFile(afterId, file, mime) },
+                onAddRef = { frameId, uri -> session.addRef(frameId, uri) },
             )
         }
         else -> {

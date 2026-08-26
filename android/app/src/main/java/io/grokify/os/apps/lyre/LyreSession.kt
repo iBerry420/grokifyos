@@ -1,7 +1,10 @@
 package io.grokify.os.apps.lyre
 
 import android.app.Application
+import android.net.Uri
 import io.grokify.os.GrokifyApp
+import io.grokify.os.apps.plugin.HostApiKeyStore
+import io.grokify.os.data.ApiKeyIds
 import io.grokify.os.data.TokenStore
 import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
@@ -32,6 +35,7 @@ class LyreSession(
     val api: LyreApi = defaultApi(app),
     val cache: LyreCache = LyreCache(app, api),
     cutterOverride: LyreCutter? = null,
+    imagineOverride: LyreImagineClient? = null,
 ) {
     private val appCtx = app.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -45,6 +49,10 @@ class LyreSession(
     private val gens = LyreMovieGens(cache, { file -> cutter.probe(file) }) { bid, op ->
         enqueuePendingFor(bid, op)
     }
+    private val imagine: LyreImagineClient = imagineOverride ?: LyreImagineClient(
+        api,
+        xaiKey = { HostApiKeyStore.getValue(appCtx, ApiKeyIds.SPACEXAI) },
+    )
 
     private val _board = MutableStateFlow<BoardData?>(null)
     val board: StateFlow<BoardData?> = _board
@@ -54,6 +62,9 @@ class LyreSession(
 
     private val _busy = MutableStateFlow<LyreJob?>(null)
     val busy: StateFlow<LyreJob?> = _busy
+
+    private val _imagineBusy = MutableStateFlow(false)
+    val imagineBusy: StateFlow<Boolean> = _imagineBusy
 
     @Volatile
     private var running: Job? = null
@@ -129,6 +140,147 @@ class LyreSession(
     }
 
     fun movieGens(): LyreMovieGens = gens
+
+    fun generateStill(
+        frameId: String,
+        prompt: String,
+        extraRefKeys: List<String> = emptyList(),
+        aspect: String = "16:9",
+    ) {
+        if (_busy.value != null || _imagineBusy.value) return
+        val id = _boardId.value ?: return
+        val board = _board.value ?: return
+        if (LyreRules.leftoverFrame(board, frameId) == null) return
+        _imagineBusy.value = true
+        scope.launch {
+            val t0 = System.currentTimeMillis()
+            try {
+                if (!cache.online()) {
+                    mutex.withLock { writeImagineError(id, frameId, still = "offline") }
+                    return@launch
+                }
+                mutex.withLock {
+                    val b = _board.value ?: return@withLock
+                    val r = LyreRules.patchLeftoverFrame(b, frameId) {
+                        it.copy(generating = true, generatingError = null)
+                    }
+                    if (r.board !== b) commit(id, r.board)
+                }
+                val live = _board.value ?: return@launch
+                val frame = LyreRules.leftoverFrame(live, frameId) ?: return@launch
+                val keys = buildList {
+                    if (frame.src.isNotEmpty()) add(frame.src)
+                    addAll(extraRefKeys.take(LyreImagine.MAX_REFS))
+                }
+                val images = keys.mapNotNull { key ->
+                    val f = localOrResolve(id, key) ?: return@mapNotNull null
+                    LyreImagine.inlineImage(f)
+                }.take(LyreImagine.MAX_IMAGES)
+                val dest = cache.tmpFile(id, ".jpg")
+                val result = imagine.still(id, id, frameId, prompt, images, aspect, dest)
+                when (result) {
+                    is ImagineStillResult.Remote -> {
+                        cache.resolve(id, result.path)
+                        mutex.withLock { applyStill(id, frameId, result.path, result.provider, t0) }
+                    }
+                    is ImagineStillResult.Local -> {
+                        val key = "boards/$id/frames/$frameId.jpg"
+                        cache.importObject(id, key, result.file)
+                        putNow(id, key)
+                        mutex.withLock { applyStill(id, frameId, key, result.provider, t0) }
+                    }
+                    is ImagineStillResult.Err -> {
+                        mutex.withLock {
+                            writeImagineError(id, frameId, still = result.reason)
+                            activity(
+                                id, "imagine_still",
+                                "provider=none kind=still ms=${System.currentTimeMillis() - t0} ok=false ${result.reason}",
+                                _board.value?.activeSceneId, frameId, null,
+                            )
+                        }
+                    }
+                }
+            } finally {
+                _imagineBusy.value = false
+            }
+        }
+    }
+
+    fun generateClip(
+        frameId: String,
+        prompt: String,
+        duration: Int,
+        aspect: String,
+        resolution: String,
+        extraRefKeys: List<String> = emptyList(),
+        voiceIds: List<String> = emptyList(),
+    ) {
+        startVideoImagine(frameId, prompt, duration, aspect, resolution, extraRefKeys, voiceIds, edit = false)
+    }
+
+    fun editClip(
+        frameId: String,
+        prompt: String,
+        duration: Int,
+        aspect: String,
+        resolution: String,
+        extraRefKeys: List<String> = emptyList(),
+        voiceIds: List<String> = emptyList(),
+    ) {
+        startVideoImagine(frameId, prompt, duration, aspect, resolution, extraRefKeys, voiceIds, edit = true)
+    }
+
+    fun importUri(afterFrameId: String?, uri: Uri) {
+        if (_busy.value != null) return
+        val id = _boardId.value ?: return
+        scope.launch {
+            mutex.withLock {
+                val board = _board.value ?: return@withLock
+                if (afterFrameId != null && LyreRules.leftoverFrame(board, afterFrameId) == null) return@withLock
+                val tmp = cache.tmpFile(id, ".bin")
+                if (!copyUriToFile(uri, tmp)) return@withLock
+                importLocal(id, board, afterFrameId, tmp, mimeOf(uri, tmp))
+            }
+        }
+    }
+
+    fun importFile(afterFrameId: String?, file: File, mime: String) {
+        if (_busy.value != null) return
+        val id = _boardId.value ?: return
+        scope.launch {
+            mutex.withLock {
+                val board = _board.value ?: return@withLock
+                if (afterFrameId != null && LyreRules.leftoverFrame(board, afterFrameId) == null) return@withLock
+                importLocal(id, board, afterFrameId, file, mime)
+            }
+        }
+    }
+
+    fun addRef(frameId: String, uri: Uri) {
+        if (_busy.value != null) return
+        val id = _boardId.value ?: return
+        scope.launch {
+            mutex.withLock {
+                val board = _board.value ?: return@withLock
+                if (LyreRules.leftoverFrame(board, frameId) == null) return@withLock
+                val tmp = cache.tmpFile(id, ".jpg")
+                if (!copyUriToFile(uri, tmp)) return@withLock
+                val refId = LyreRules.newId("rf_")
+                val key = "boards/$id/refs/$refId.jpg"
+                cache.importObject(id, key, tmp)
+                enqueuePendingFor(
+                    id,
+                    LyrePendingOp(0, "storage_put", key = key, localPath = cache.objectRel(id, key)),
+                )
+                val r = LyreRules.patchLeftoverFrame(board, frameId) { frame ->
+                    val refs = ((frame.videoRefSrcs ?: emptyList()) + key).distinct().take(LyreImagine.MAX_REFS)
+                    frame.copy(videoRefSrcs = refs)
+                }
+                if (r.board !== board) commit(id, r.board)
+                scope.launch { flushPending(id) }
+            }
+        }
+    }
 
     private suspend fun applyLocked(result: RuleResult, capturedEpoch: Int) {
         val id = _boardId.value ?: return
@@ -781,6 +933,284 @@ class LyreSession(
     }
 
     private fun requireBoardId(): String = _boardId.value ?: "lyre"
+
+    private fun startVideoImagine(
+        frameId: String,
+        prompt: String,
+        duration: Int,
+        aspect: String,
+        resolution: String,
+        extraRefKeys: List<String>,
+        voiceIds: List<String>,
+        edit: Boolean,
+    ) {
+        if (_busy.value != null || _imagineBusy.value) return
+        val id = _boardId.value ?: return
+        val board = _board.value ?: return
+        val frame = LyreRules.leftoverFrame(board, frameId) ?: return
+        if (edit) {
+            val clipSrc = frame.videoSrc.orEmpty()
+            if (clipSrc.isEmpty()) return
+        }
+        _imagineBusy.value = true
+        scope.launch {
+            val t0 = System.currentTimeMillis()
+            try {
+                if (!cache.online()) {
+                    mutex.withLock { writeImagineError(id, frameId, video = "offline") }
+                    return@launch
+                }
+                mutex.withLock {
+                    val b = _board.value ?: return@withLock
+                    val r = LyreRules.patchLeftoverFrame(b, frameId) {
+                        it.copy(
+                            videoGenerating = true,
+                            videoGeneratingError = null,
+                            videoPrompt = prompt,
+                            videoRefSrcs = extraRefKeys.take(LyreImagine.MAX_REFS).ifEmpty { it.videoRefSrcs },
+                            videoVoices = LyreImagine.filterVoices(voiceIds).ifEmpty { it.videoVoices },
+                        )
+                    }
+                    if (r.board !== b) commit(id, r.board)
+                }
+                val live = _board.value ?: return@launch
+                val cur = LyreRules.leftoverFrame(live, frameId) ?: return@launch
+                val posterKey = cur.src
+                val refs = extraRefKeys.filter { it.isNotBlank() }.distinct().take(LyreImagine.MAX_REFS)
+                val videoKey = cur.videoSrc.orEmpty()
+                val putKeys = buildList {
+                    if (posterKey.isNotEmpty()) add(posterKey)
+                    addAll(refs)
+                    if (edit && videoKey.isNotEmpty()) add(videoKey)
+                }
+                val grokmeReady = awaitPuts(id, putKeys)
+                val poster = localOrResolve(id, posterKey)
+                val refFiles = refs.mapNotNull { localOrResolve(id, it) }
+                val dest = cache.tmpFile(id, ".mp4")
+                val voices = LyreImagine.filterVoices(voiceIds)
+                val result = if (edit) {
+                    imagine.edit(
+                        id, id, prompt, duration, aspect, resolution,
+                        videoKey, posterKey.takeIf { it.isNotEmpty() }, refs, voices,
+                        poster, refFiles, dest,
+                    )
+                } else if (grokmeReady || poster != null) {
+                    imagine.video(
+                        id, id, prompt, duration, aspect, resolution,
+                        posterKey, refs, voices, poster, refFiles, dest,
+                    )
+                } else {
+                    ImagineVideoResult.Err("grokme_unavailable")
+                }
+                when (result) {
+                    is ImagineVideoResult.Ready -> applyClip(id, frameId, result.file, result.provider, t0, edit)
+                    is ImagineVideoResult.Err -> {
+                        mutex.withLock {
+                            writeImagineError(id, frameId, video = result.reason)
+                            activity(
+                                id, if (edit) "imagine_edit" else "imagine_video",
+                                "provider=none kind=video ms=${System.currentTimeMillis() - t0} ok=false ${result.reason}",
+                                _board.value?.activeSceneId, frameId, null,
+                            )
+                        }
+                    }
+                }
+            } finally {
+                _imagineBusy.value = false
+            }
+        }
+    }
+
+    private fun applyStill(id: String, frameId: String, path: String, provider: String, t0: Long) {
+        val b = _board.value ?: return
+        val r = LyreRules.setStill(b, frameId, path)
+        if (r.board !== b) commit(id, r.board)
+        activity(
+            id, "imagine_still",
+            "provider=$provider kind=still ms=${System.currentTimeMillis() - t0} ok=true",
+            r.board.activeSceneId, frameId, null,
+        )
+    }
+
+    private suspend fun applyClip(
+        id: String,
+        frameId: String,
+        file: File,
+        provider: String,
+        t0: Long,
+        edit: Boolean,
+    ) {
+        val clipId = _board.value?.videoLayers?.flatMap { it.clips }
+            ?.firstOrNull { it.linkedFrameId == frameId }?.id
+            ?: LyreRules.newId("lc_")
+        val key = "boards/$id/clips/$clipId.mp4"
+        cache.importObject(id, key, file)
+        putNow(id, key)
+        val probe = runCatching { cutter.probe(cache.objectFile(id, key)) }.getOrNull()
+        val dur = probe?.durationSec?.takeIf { it > 0.0 } ?: 6.0
+        mutex.withLock {
+            val b = _board.value ?: return
+            if (LyreRules.leftoverFrame(b, frameId) == null) return
+            val r = LyreRules.attachClip(b, frameId, key, dur, probe?.fps)
+            if (r.board !== b) commit(id, r.board)
+            activity(
+                id, if (edit) "imagine_edit" else "imagine_video",
+                "provider=$provider kind=video ms=${System.currentTimeMillis() - t0} ok=true",
+                r.board.activeSceneId, frameId, clipId,
+            )
+        }
+    }
+
+    private suspend fun importLocal(
+        id: String,
+        board: BoardData,
+        afterFrameId: String?,
+        file: File,
+        mime: String,
+    ) {
+        if (!file.isFile || file.length() <= 0L) return
+        val isVideo = mime.startsWith("video/") || file.extension.lowercase() in setOf("mp4", "mov", "webm", "m4v")
+        val frameId = LyreRules.newId("fr_")
+        if (isVideo) {
+            val clipId = LyreRules.newId("lc_")
+            val key = "boards/$id/clips/$clipId.mp4"
+            cache.importObject(id, key, file)
+            enqueuePendingFor(id, LyrePendingOp(0, "storage_put", key = key, localPath = cache.objectRel(id, key)))
+            val probe = runCatching { cutter.probe(cache.objectFile(id, key)) }.getOrNull()
+            val dur = probe?.durationSec?.takeIf { it > 0.0 } ?: 6.0
+            val frame = Frame(
+                id = frameId,
+                src = "",
+                caption = "Clip",
+                durationSec = dur,
+                videoSrc = key,
+                videoDurationSec = dur,
+                videoFps = probe?.fps,
+                videoInSec = 0.0,
+                videoOutSec = dur,
+            )
+            val clip = LayerClip(
+                id = clipId,
+                src = key,
+                name = "Clip",
+                startSec = 0.0,
+                durationSec = dur,
+                sourceDurationSec = dur,
+                linkedFrameId = frameId,
+            )
+            applyLocked(LyreRules.insertLeftover(board, afterFrameId, frame, clip), boardEpoch.get())
+        } else {
+            val ext = when {
+                mime.contains("png") || file.extension.equals("png", true) -> "png"
+                mime.contains("webp") -> "webp"
+                else -> "jpg"
+            }
+            val key = "boards/$id/frames/$frameId.$ext"
+            cache.importObject(id, key, file)
+            enqueuePendingFor(id, LyrePendingOp(0, "storage_put", key = key, localPath = cache.objectRel(id, key)))
+            val frame = Frame(
+                id = frameId,
+                src = key,
+                caption = "Still",
+                durationSec = 2.0,
+            )
+            applyLocked(LyreRules.insertLeftover(board, afterFrameId, frame, null), boardEpoch.get())
+        }
+        scope.launch { flushPending(id) }
+    }
+
+    private fun writeImagineError(id: String, frameId: String, still: String? = null, video: String? = null) {
+        val b = _board.value ?: return
+        val r = LyreRules.patchLeftoverFrame(b, frameId) { frame ->
+            frame.copy(
+                generating = if (still != null) false else frame.generating,
+                generatingError = still ?: frame.generatingError,
+                videoGenerating = if (video != null) false else frame.videoGenerating,
+                videoGeneratingError = video ?: frame.videoGeneratingError,
+            )
+        }
+        if (r.board !== b) {
+            boardEpoch.incrementAndGet()
+            _board.value = r.board
+            cache.writeBoardJson(id, LyreBoardCodec.encode(r.board))
+            enqueuePendingFor(
+                id,
+                LyrePendingOp(0, "save_board", createdAtMs = System.currentTimeMillis()),
+                snapshotJson = LyreBoardCodec.encode(r.board),
+            )
+        }
+        activity(id, "imagine_failed", still ?: video ?: "failed", r.board.activeSceneId, frameId, null)
+        scope.launch { flushPending(id) }
+    }
+
+    private suspend fun awaitPuts(boardId: String, keys: Collection<String>): Boolean {
+        if (keys.isEmpty()) return true
+        if (!cache.online()) return false
+        return flushMutex.withLock {
+            var ok = true
+            for (key in keys.distinct().filter { it.isNotBlank() }) {
+                val pending = cache.listPending(boardId)
+                    .filter { it.second.type == "storage_put" && it.second.key == key }
+                val local = pending.firstNotNullOfOrNull { cache.pendingFile(it.second, boardId) }
+                    ?: cache.objectFile(boardId, key).takeIf { it.isFile && it.length() > 0L }
+                    ?: cache.resolve(boardId, key)?.takeIf { it.length() > 0L }
+                if (local == null) {
+                    ok = false
+                    continue
+                }
+                val resp = runCatching { api.putStorage(key, local) }.getOrNull()
+                if (resp?.optBoolean("ok", false) == true) {
+                    pending.forEach { cache.deletePending(it.first) }
+                } else {
+                    ok = false
+                    if (pending.isEmpty()) {
+                        enqueuePendingFor(
+                            boardId,
+                            LyrePendingOp(0, "storage_put", key = key, localPath = cache.objectRel(boardId, key)),
+                        )
+                    }
+                }
+            }
+            ok
+        }
+    }
+
+    private fun putNow(boardId: String, key: String) {
+        val local = cache.objectFile(boardId, key)
+        if (!local.isFile || local.length() <= 0L) return
+        val resp = runCatching { api.putStorage(key, local) }.getOrNull()
+        if (resp?.optBoolean("ok", false) != true) {
+            enqueuePendingFor(
+                boardId,
+                LyrePendingOp(0, "storage_put", key = key, localPath = cache.objectRel(boardId, key)),
+            )
+        }
+    }
+
+    private fun localOrResolve(boardId: String, key: String): File? {
+        if (key.isBlank()) return null
+        val local = cache.objectFile(boardId, key)
+        if (local.isFile && local.length() > 0L) return local
+        return cache.resolve(boardId, key)?.takeIf { it.length() > 0L }
+    }
+
+    private fun copyUriToFile(uri: Uri, dest: File): Boolean {
+        dest.parentFile?.mkdirs()
+        return try {
+            appCtx.contentResolver.openInputStream(uri)?.use { input ->
+                dest.outputStream().use { input.copyTo(it) }
+            } ?: return false
+            dest.isFile && dest.length() > 0L
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun mimeOf(uri: Uri, file: File): String {
+        val fromUri = appCtx.contentResolver.getType(uri)?.trim().orEmpty()
+        if (fromUri.isNotEmpty()) return fromUri
+        return LyreImagine.mimeFor(file)
+    }
 
     companion object {
         private fun defaultApi(app: Application): LyreApi {
