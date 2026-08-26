@@ -187,13 +187,13 @@ object LyreRules {
             board.activeSceneId != sceneId -> board.activeSceneId
             else -> scenes.first().id
         }
-        val layers = dropClipsForFrames(board.videoLayers, dropped)
         return RuleResult(
             retimeLinkedClips(
                 board.copy(
                     scenes = scenes,
                     activeSceneId = active,
-                    videoLayers = layers,
+                    videoLayers = dropClipsForFrames(board.videoLayers, dropped),
+                    audioLayers = dropClipsForFrames(board.audioLayers, dropped),
                     refFolders = stashBin(board, images),
                 ),
             ),
@@ -266,12 +266,13 @@ object LyreRules {
         val scenes = board.scenes.mapIndexed { i, sc ->
             if (i != sceneIndex) sc else sc.copy(frames = sc.frames.filterNot { it.id == frameId })
         }
-        val layers = dropClipsForFrames(board.videoLayers, setOf(frameId))
+        val dropped = setOf(frameId)
         return RuleResult(
             retimeLinkedClips(
                 board.copy(
                     scenes = scenes,
-                    videoLayers = layers,
+                    videoLayers = dropClipsForFrames(board.videoLayers, dropped),
+                    audioLayers = dropClipsForFrames(board.audioLayers, dropped),
                     refFolders = stashBin(board, listOf(image)),
                 ),
             ),
@@ -282,9 +283,10 @@ object LyreRules {
     fun extractAudio(board: BoardData, clipId: String): RuleResult {
         val clip = leftoverVideoClip(board, clipId) ?: return RuleResult(board, null)
         if (clip.src.isEmpty()) return RuleResult(board, null)
+        val audioId = newId("lc_")
         val audioClip = LayerClip(
-            id = newId("lc_"),
-            src = audioKey(board, clip.id),
+            id = audioId,
+            src = audioKey(board, audioId),
             name = clip.name.ifBlank { "Audio" },
             startSec = clip.startSec,
             durationSec = clip.durationSec,
@@ -456,15 +458,19 @@ object LyreRules {
 
     internal fun retimeLinkedClips(board: BoardData): BoardData {
         val startByFrame = LyreClip.movieClips(board.scenes).associate { it.frame.id to it.start }
-        return board.copy(
-            videoLayers = board.videoLayers.map { layer ->
+        fun retimed(layers: List<MediaLayer>): List<MediaLayer> {
+            return layers.map { layer ->
                 layer.copy(
                     clips = layer.clips.map { clip ->
                         val start = clip.linkedFrameId?.let { startByFrame[it] } ?: return@map clip
                         clip.copy(startSec = start)
                     },
                 )
-            },
+            }
+        }
+        return board.copy(
+            videoLayers = retimed(board.videoLayers),
+            audioLayers = retimed(board.audioLayers),
         )
     }
 

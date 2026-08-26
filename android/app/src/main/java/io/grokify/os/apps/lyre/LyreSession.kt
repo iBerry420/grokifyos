@@ -238,27 +238,25 @@ class LyreSession(
                 }
                 val local = cache.resolve(id, compiled)?.takeIf { it.length() > 0L }
                 if (local != null) {
+                    var putOk = false
                     if (cache.online()) {
                         val put = runCatching { api.putStorage(compiled, local) }.getOrNull()
-                        if (put == null || !put.optBoolean("ok", false)) {
-                            enqueuePendingFor(
-                                id,
-                                LyrePendingOp(0, "storage_put", key = compiled, localPath = cache.objectRel(id, compiled)),
-                            )
-                        }
-                    } else {
+                        putOk = put != null && put.optBoolean("ok", false)
+                    }
+                    if (!putOk) {
                         enqueuePendingFor(
                             id,
                             LyrePendingOp(0, "storage_put", key = compiled, localPath = cache.objectRel(id, compiled)),
                         )
+                        queuePublish(id, vis, compiled, if (cache.online()) "storage_put_failed" else "offline")
+                        return
                     }
+                } else if (cache.online()) {
+                    flushPending(id)
                 }
             }
             if (!cache.online()) {
-                enqueuePendingFor(
-                    id,
-                    LyrePendingOp(0, "publish", key = compiled, visibility = vis),
-                )
+                queuePublish(id, vis, compiled, "offline")
                 return
             }
             val resp = api.publish(publishId, vis, compiled)
@@ -268,22 +266,25 @@ class LyreSession(
                 activity(id, "publish", "publish $vis", null, null, compiled)
             } else {
                 val err = resp.optString("error").ifBlank { "publish_failed" }
-                _watchError.value = err
                 Log.w("Lyre", "publish failed $err")
-                enqueuePendingFor(
-                    id,
-                    LyrePendingOp(0, "publish", key = compiled, visibility = vis),
-                )
+                queuePublish(id, vis, compiled, err)
             }
         } catch (e: Exception) {
-            _watchError.value = e.message ?: "publish_failed"
             Log.w("Lyre", "publish failed")
-            enqueuePendingFor(
-                id,
-                LyrePendingOp(0, "publish", key = compiled, visibility = vis),
-            )
+            queuePublish(id, vis, compiled, e.message ?: "publish_failed")
         } finally {
             _watchBusy.value = false
+        }
+    }
+
+    private suspend fun queuePublish(id: String, vis: String, compiled: String?, error: String) {
+        enqueuePendingFor(
+            id,
+            LyrePendingOp(0, "publish", key = compiled, visibility = vis),
+        )
+        if (cache.online()) flushPending(id)
+        if (_project.value?.visibility != vis) {
+            _watchError.value = error
         }
     }
 

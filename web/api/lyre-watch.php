@@ -37,18 +37,6 @@ if (!is_array($row)) {
     gos_api_json(['ok' => false, 'error' => 'not_found'], 404);
 }
 
-if ($httpMethod === 'HEAD') {
-    while (ob_get_level() > 0) {
-        ob_end_clean();
-    }
-    header_remove('Content-Type');
-    header('Content-Type: video/mp4');
-    header('Cache-Control: no-store');
-    header('X-Content-Type-Options: nosniff');
-    http_response_code(200);
-    exit;
-}
-
 $base = rtrim((string) (gos_env('GROKIFY_LYRE_ME_STORAGE_BASE', 'https://me.grokpot.io/v1/storage') ?? ''), '/');
 $apiKey = (string) (gos_env('GROKIFY_LYRE_ME_API_KEY', '') ?? '');
 if ($base === '' || $apiKey === '') {
@@ -62,6 +50,62 @@ if (!function_exists('curl_init')) {
 
 $key = 'public/watch/' . $token . '.mp4';
 $url = $base . '/' . implode('/', array_map('rawurlencode', explode('/', $key)));
+
+if ($httpMethod === 'HEAD') {
+    $status = 0;
+    $contentType = 'video/mp4';
+    $contentLength = null;
+    $ch = curl_init($url);
+    if ($ch === false) {
+        gos_api_json(['ok' => false, 'error' => 'not_found'], 404);
+    }
+    curl_setopt_array($ch, [
+        CURLOPT_NOBODY => true,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_CONNECTTIMEOUT => 30,
+        CURLOPT_TIMEOUT => 60,
+        CURLOPT_HTTPHEADER => [
+            'Authorization: Bearer ' . $apiKey,
+            'Accept: */*',
+        ],
+        CURLOPT_HEADERFUNCTION => static function ($ch, string $header) use (&$status, &$contentType, &$contentLength): int {
+            if (preg_match('#^HTTP/\S+\s+(\d+)#', $header, $m) === 1) {
+                $status = (int) $m[1];
+            } elseif (stripos($header, 'Content-Type:') === 0) {
+                $got = trim(substr($header, strlen('Content-Type:')));
+                if ($got !== '') {
+                    $contentType = $got;
+                }
+            } elseif (stripos($header, 'Content-Length:') === 0) {
+                $contentLength = trim(substr($header, strlen('Content-Length:')));
+            }
+            return strlen($header);
+        },
+    ]);
+    $ok = curl_exec($ch);
+    $errno = curl_errno($ch);
+    curl_close($ch);
+    if ($ok === false || $errno !== 0 || $status !== 200) {
+        if ($status === 404 || $status === 401) {
+            gos_api_json(['ok' => false, 'error' => 'not_found'], 404);
+        }
+        gos_api_json(['ok' => false, 'error' => 'not_found'], $status >= 400 ? $status : 502);
+    }
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    header_remove('Content-Type');
+    header('Content-Type: ' . ($contentType !== '' ? $contentType : 'video/mp4'));
+    if (is_string($contentLength) && $contentLength !== '' && ctype_digit($contentLength)) {
+        header('Content-Length: ' . $contentLength);
+    }
+    header('Cache-Control: no-store');
+    header('X-Content-Type-Options: nosniff');
+    http_response_code(200);
+    exit;
+}
+
 $tmp = tmpfile();
 if ($tmp === false) {
     gos_api_json(['ok' => false, 'error' => 'not_found'], 404);

@@ -322,6 +322,7 @@ function gos_lyre_storage_key(string $raw): ?string
     if (preg_match('#^boards/[A-Za-z0-9_./-]+$#', $key) === 1) {
         return $key;
     }
+    // Server publish copy + lyre-watch.php only; client put/get reject this prefix.
     if (preg_match('#^public/watch/[a-f0-9]{32}\.mp4$#', $key) === 1) {
         return $key;
     }
@@ -337,7 +338,7 @@ function gos_lyre_json_error(string $error, int $code): never
 function gos_lyre_storage_put(string $rawKey): never
 {
     $key = gos_lyre_storage_key($rawKey);
-    if ($key === null) {
+    if ($key === null || str_starts_with($key, 'public/watch/')) {
         gos_lyre_json_error('invalid_key', 400);
     }
     $base = rtrim((string) (gos_env('GROKIFY_LYRE_ME_STORAGE_BASE', 'https://me.grokpot.io/v1/storage') ?? ''), '/');
@@ -415,7 +416,7 @@ function gos_lyre_storage_put(string $rawKey): never
 function gos_lyre_storage_get(string $rawKey): never
 {
     $key = gos_lyre_storage_key($rawKey);
-    if ($key === null) {
+    if ($key === null || str_starts_with($key, 'public/watch/')) {
         gos_lyre_json_error('invalid_key', 400);
     }
     $base = rtrim((string) (gos_env('GROKIFY_LYRE_ME_STORAGE_BASE', 'https://me.grokpot.io/v1/storage') ?? ''), '/');
@@ -812,14 +813,14 @@ function gos_lyre_me_delete(string $key): void
     $apiKey = gos_lyre_me_api_key();
     $base = rtrim((string) (gos_env('GROKIFY_LYRE_ME_STORAGE_BASE', 'https://me.grokpot.io/v1/storage') ?? ''), '/');
     if ($base === '' || $apiKey === '') {
-        return;
+        gos_lyre_json_error('lyre_storage_unconfigured', 503);
     }
     if (!function_exists('curl_init')) {
-        return;
+        gos_lyre_json_error('curl_missing', 500);
     }
     $ch = curl_init(gos_lyre_me_storage_url($key));
     if ($ch === false) {
-        return;
+        gos_lyre_json_error('storage_delete_failed', 502);
     }
     curl_setopt_array($ch, [
         CURLOPT_CUSTOMREQUEST => 'DELETE',
@@ -832,8 +833,17 @@ function gos_lyre_me_delete(string $key): void
             'Accept: */*',
         ],
     ]);
-    curl_exec($ch);
+    $raw = curl_exec($ch);
+    $errno = curl_errno($ch);
+    $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
+    if ($status === 404 && $errno === 0) {
+        return;
+    }
+    if ($raw === false || $errno !== 0 || $status < 200 || $status >= 300) {
+        error_log('lyre storage_delete key=' . $key . ' status=' . $status . ' errno=' . $errno);
+        gos_lyre_json_error('storage_delete_failed', $errno === 28 ? 504 : ($status >= 400 ? $status : 502));
+    }
 }
 
 function gos_lyre_lookup_project(PDO $mysql, int $userId, array $body): ?array

@@ -44,7 +44,7 @@ class LyreApi(private val tokenProvider: () -> String?) {
     fun saveBoard(id: String, data: JSONObject): JSONObject =
         post(JSONObject().put("action", "save_board").put("id", id).put("data", data))
 
-    /** JSON POST; copies compiled mp4 to public/watch or deletes it. */
+    /** JSON POST; does not block on grokme matcher. */
     fun publish(id: String, visibility: String, compiledKey: String?): JSONObject {
         val body = JSONObject().put("action", "publish").put("id", id).put("visibility", visibility)
         if (!compiledKey.isNullOrBlank()) body.put("compiled_key", compiledKey)

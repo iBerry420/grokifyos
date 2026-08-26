@@ -261,7 +261,13 @@ class LyreRulesTest {
         val bed = extracted.board.audioLayers[0].clips[0]
         assertEquals("fr_b", bed.linkedFrameId)
         assertEquals(clipOf(unstitched, "lc_b").startSec, bed.startSec, 0.0)
+        assertEquals("boards/lyre/audio/${bed.id}.m4a", bed.src)
         assertTrue(unstitched.audioLayers.isEmpty())
+
+        val twice = LyreRules.extractAudio(extracted.board, "lc_b")
+        val srcs = twice.board.audioLayers.flatMap { it.clips }.map { it.src }
+        assertEquals(2, srcs.size)
+        assertEquals(2, srcs.toSet().size)
 
         val muted = LyreRules.mute(unstitched, "lc_b")
         assertTrue(muted.board.audioLayers.isEmpty())
@@ -308,6 +314,42 @@ class LyreRulesTest {
         assertEquals(1, hold.board.audioLayers.size)
         assertEquals("fr_hold", hold.board.audioLayers[0].clips[0].linkedFrameId)
         assertEquals(4.0, hold.board.audioLayers[0].clips[0].startSec, 0.0)
+
+        val holdAtZero = unstitched.copy(
+            scenes = unstitched.scenes.map { sc ->
+                sc.copy(
+                    frames = listOf(Frame(id = "fr_zero", src = "", caption = "Hold", durationSec = 2.0)) + sc.frames,
+                )
+            },
+        )
+        assertFalse(LyreMovie.frameInMovie(holdAtZero.movie, holdAtZero.videoLayers, "fr_zero"))
+        val zero = LyreRules.insertAudio(
+            holdAtZero,
+            "fr_zero",
+            "boards/lyre/audio/bed.m4a",
+            "Bed",
+            2.0,
+        )
+        assertEquals(0.0, zero.board.audioLayers[0].clips[0].startSec, 0.0)
+        assertEquals("fr_zero", zero.board.audioLayers[0].clips[0].linkedFrameId)
+    }
+
+    @Test
+    fun leftoverMutationsKeepAudioLayersInSync() {
+        val three = fixture("unstitched_3")
+        val extracted = LyreRules.extractAudio(three, "lc_c")
+        assertEquals(clipOf(three, "lc_c").startSec, extracted.board.audioLayers[0].clips[0].startSec, 0.0)
+
+        val trimmed = LyreRules.trim(extracted.board, "lc_b", 0.0, 1.0)
+        val wantStart = LyreClip.clipOf(trimmed.board.scenes, "fr_c")!!.start
+        assertEquals(7.0, wantStart, 0.0)
+        assertEquals(wantStart, trimmed.board.audioLayers[0].clips[0].startSec, 0.0)
+
+        val dumped = LyreRules.dumpScene(extracted.board, "sc_1")
+        assertTrue(dumped.board.audioLayers.flatMap { it.clips }.isEmpty())
+
+        val beatGone = LyreRules.removeBeat(extracted.board, "fr_c")
+        assertTrue(beatGone.board.audioLayers.flatMap { it.clips }.none { it.linkedFrameId == "fr_c" })
     }
 
     @Test

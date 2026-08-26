@@ -33,7 +33,7 @@ import io.grokify.os.apps.lyre.LyreRules
 import io.grokify.os.apps.lyre.RuleResult
 import io.grokify.os.ui.theme.GrokifyColors
 
-/** PR 5 mix test compiled; never device-run (`adb devices` empty). */
+/** false until burnAudioTwoBedsWithGapUs is device-green; chips must not call burnAudio/apply. */
 internal const val LYRE_BURN_AUDIO_DEVICE_GREEN = false
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -146,6 +146,7 @@ fun LyreClipSheet(
                             run(LyreRules.removeClip(board, clip.id))
                         })
                     }
+                    // Audio/Files/Library is the PR 7 insert surface; leftover mic/camera capture is PR 8.
                     if (leftoverFrame && onPickAudio != null) {
                         SheetChip("Audio", selected = false, onClick = {
                             if (!enabled) return@SheetChip
