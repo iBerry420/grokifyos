@@ -43,6 +43,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -58,6 +59,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import io.grokify.os.apps.lyre.BoardData
@@ -99,16 +102,6 @@ fun LyreEditor(
     val context = LocalContext.current
     val player = remember { LyrePlayer(context.applicationContext) }
     val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(player, lifecycleOwner) {
-        val obs = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) player.pause()
-        }
-        lifecycleOwner.lifecycle.addObserver(obs)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(obs)
-            player.release()
-        }
-    }
 
     val storyboard = remember(board) { LyreClip.movieClips(board.scenes) }
     val duration = remember(storyboard) { storyboard.sumOf { it.length }.toFloat() }
@@ -122,6 +115,41 @@ fun LyreEditor(
     var stills by remember { mutableStateOf<Map<String, File>>(emptyMap()) }
     var program by remember { mutableStateOf<List<LyrePlayItem>>(emptyList()) }
     var onHold by remember { mutableStateOf(false) }
+
+    fun persistPlayhead() {
+        store.playhead = playhead
+    }
+
+    fun stopPlayback() {
+        player.pause()
+        playing = false
+        persistPlayhead()
+    }
+
+    val stopPlaybackLatest = rememberUpdatedState { stopPlayback() }
+
+    DisposableEffect(player, lifecycleOwner) {
+        val listener = object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                val errorIdle = playbackState == Player.STATE_IDLE && player.exo.playerError != null
+                if (playbackState == Player.STATE_ENDED || errorIdle) stopPlaybackLatest.value()
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                stopPlaybackLatest.value()
+            }
+        }
+        player.exo.addListener(listener)
+        val obs = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) stopPlaybackLatest.value()
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose {
+            player.exo.removeListener(listener)
+            lifecycleOwner.lifecycle.removeObserver(obs)
+            player.release()
+        }
+    }
 
     LaunchedEffect(board, boardId) {
         val resolved = withContext(Dispatchers.IO) {
@@ -154,13 +182,13 @@ fun LyreEditor(
                 val pos = player.exo.currentPosition / 1000.0
                 val t = lyreStillsFromPlayItem(board, item, pos).toFloat()
                 playhead = t
-                store.playhead = t
                 val leftoverId = (lyreClockTarget(board, t.toDouble()) as? LyreClockTarget.Leftover)?.clipId
                 player.syncLoop(store.loopClip, leftoverId)
             }
-            if (!player.exo.isPlaying && !player.exo.playWhenReady) {
-                playing = false
-                store.playhead = playhead
+            val state = player.exo.playbackState
+            val errorIdle = state == Player.STATE_IDLE && player.exo.playerError != null
+            if (state == Player.STATE_ENDED || errorIdle) {
+                stopPlayback()
                 break
             }
             delay(80)
@@ -178,7 +206,7 @@ fun LyreEditor(
     fun seekTo(t: Double, resume: Boolean) {
         val clamped = t.coerceIn(0.0, duration.toDouble().coerceAtLeast(0.0))
         playhead = clamped.toFloat()
-        store.playhead = playhead
+        persistPlayhead()
         applyClock(board, player, clamped, resume, store.loopClip) { hold ->
             onHold = hold
             playing = resume && !hold
@@ -193,9 +221,7 @@ fun LyreEditor(
             return
         }
         if (playing) {
-            player.pause()
-            playing = false
-            store.playhead = playhead
+            stopPlayback()
         } else {
             seekTo(playhead.toDouble(), resume = true)
         }
@@ -491,6 +517,7 @@ private fun LyreClock(
     onSeek: (Double) -> Unit,
 ) {
     val total = duration.coerceAtLeast(0.1f)
+    val seekLatest = rememberUpdatedState(onSeek)
     val sceneStarts = remember(clips) { clips.distinctBy { it.sceneId } }
     Column(
         Modifier
@@ -526,7 +553,7 @@ private fun LyreClock(
                 .background(GrokifyColors.Panel)
                 .pointerInput(total) {
                     detectTapGestures { offset ->
-                        onSeek((offset.x / size.width.toFloat()) * total.toDouble())
+                        seekLatest.value((offset.x / size.width.toFloat()) * total.toDouble())
                     }
                 },
         ) {

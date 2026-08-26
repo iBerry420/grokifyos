@@ -14,7 +14,7 @@ data class VideoWindow(
     val trimmed: Boolean,
 )
 
-/** Storyboard beat on the stills clock (TS MovieClip). */
+/** Storyboard beat on the stills clock. */
 data class StoryboardClip(
     val frame: Frame,
     val sceneId: String,

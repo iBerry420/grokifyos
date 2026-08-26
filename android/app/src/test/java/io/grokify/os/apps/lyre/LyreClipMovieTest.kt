@@ -126,6 +126,54 @@ class LyreClipMovieTest {
     }
 
     @Test
+    fun stillsFromMovieFileSkipsHoldAtPartJoin() {
+        val board = unstitched()
+        assertEquals(4.0, stillsFromMovieFile(board, 4.0), 1e-9)
+        assertTrue(lyreClockTarget(board, 4.0) is LyreClockTarget.Hold)
+        assertTrue(lyreClockTarget(board, 6.0) is LyreClockTarget.Leftover)
+
+        val stitched = board.copy(
+            movie = BoardMovie(
+                src = "boards/lyre/movie.mp4",
+                durationSec = 7.0,
+                parts = listOf(
+                    MoviePart("lc_a", "boards/lyre/clips/lc_a.mp4", 4.0),
+                    MoviePart("lc_b", "boards/lyre/clips/lc_b.mp4", 3.0),
+                ),
+            ),
+        )
+        assertEquals(0.0, stillsFromMovieFile(stitched, 0.0), 1e-9)
+        assertEquals(3.9, stillsFromMovieFile(stitched, 3.9), 1e-9)
+        assertEquals(6.0, stillsFromMovieFile(stitched, 4.0), 1e-9)
+        assertEquals(7.5, stillsFromMovieFile(stitched, 5.5), 1e-9)
+        assertEquals(9.0, stillsFromMovieFile(stitched, 7.0), 1e-9)
+
+        val atB = lyreClockTarget(stitched, 6.0)
+        assertTrue(atB is LyreClockTarget.Movie)
+        assertEquals(4.0, (atB as LyreClockTarget.Movie).positionSec, 1e-9)
+        assertEquals(6.0, stillsFromMovieFile(stitched, atB.positionSec), 1e-9)
+
+        // User seek onto the hold stays Hold; movie-file 4.0 is B, not the hold.
+        assertTrue(lyreClockTarget(stitched, 4.0) is LyreClockTarget.Hold)
+        val inA = lyreClockTarget(stitched, 3.9)
+        assertTrue(inA is LyreClockTarget.Movie)
+        assertEquals(3.9, (inA as LyreClockTarget.Movie).positionSec, 1e-9)
+    }
+
+    @Test
+    fun movieGroupOnLayerFallsBackWhenDurationIsZero() {
+        val board = unstitched()
+        val live = LyreMovie.movieGroupOnLayer(board.videoLayers[0], board.movie, board.videoLayers)
+        assertNotNull(live)
+        assertEquals(4.0, live!!.clip.sourceDurationSec!!, 0.0)
+
+        val zero = board.copy(movie = board.movie!!.copy(durationSec = 0.0))
+        val group = LyreMovie.movieGroupOnLayer(zero.videoLayers[0], zero.movie, zero.videoLayers)
+        assertNotNull(group)
+        assertEquals(4.0, group!!.clip.sourceDurationSec!!, 0.0)
+    }
+
+    @Test
     fun clipLengthFloorAndSpokenEstimate() {
         val hold = frame("fr_z", "Hold", 0.0)
         assertEquals(0.1, LyreClip.clipLength(hold), 0.0)

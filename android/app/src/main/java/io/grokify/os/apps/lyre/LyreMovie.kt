@@ -103,7 +103,7 @@ object LyreMovie {
                 startSec = start,
                 durationSec = play,
                 trimInSec = 0.0,
-                sourceDurationSec = live?.durationSec ?: span,
+                sourceDurationSec = jsOr(live?.durationSec, span),
                 linkedFrameId = first.linkedFrameId,
             ),
         )

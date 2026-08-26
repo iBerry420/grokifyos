@@ -218,7 +218,7 @@ private fun movieFilePosition(board: BoardData, sc: StoryboardClip, t: Double): 
     return prefix + local.coerceAtMost(partLen)
 }
 
-private fun stillsFromMovieFile(board: BoardData, fileTime: Double): Double {
+internal fun stillsFromMovieFile(board: BoardData, fileTime: Double): Double {
     val layers = board.videoLayers
     val live = LyreMovie.resolvedMovie(board.movie, layers) ?: return fileTime
     val mapped = LyreMovie.moviePartDurations(
@@ -232,7 +232,8 @@ private fun stillsFromMovieFile(board: BoardData, fileTime: Double): Double {
         val dur = mapped.getOrElse(i) { 0.0 }
         val frameId = ordered.find { it.id == part.clipId }?.linkedFrameId
         val sc = frameId?.let { LyreClip.clipOf(board.scenes, it) }
-        if (i == last || remain <= dur + 1e-6) {
+        // Join belongs to the next member; holds between members are not movie-file time.
+        if (i == last || remain < dur) {
             return (sc?.start ?: 0.0) + remain.coerceAtMost(max(dur, 0.0))
         }
         remain -= dur
