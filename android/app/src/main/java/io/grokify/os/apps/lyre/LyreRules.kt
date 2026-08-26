@@ -85,7 +85,7 @@ object LyreRules {
             durationSec = length,
         )
         return RuleResult(
-            replaceClipAndFrame(board, nextClip, nextFrame),
+            retimeLinkedClips(replaceClipAndFrame(board, nextClip, nextFrame)),
             CutPlan(kind = CutKind.TRIM, clipKey = nextClip.src, trimInSec = start, trimOutSec = out),
         )
     }
@@ -106,14 +106,14 @@ object LyreRules {
         val clip = leftoverVideoClip(board, clipId) ?: return RuleResult(board, null)
         val frame = clip.linkedFrameId?.let { findFrame(board, it) } ?: return RuleResult(board, null)
         val inn = clip.trimInSec ?: frame.videoInSec ?: 0.0
-        val native = clip.sourceDurationSec ?: frame.videoDurationSec ?: (inn + clip.durationSec)
+        val native = jsOr(clip.sourceDurationSec, jsOr(frame.videoDurationSec, inn + clip.durationSec))
         val out = frame.videoOutSec ?: (inn + clip.durationSec)
         if (atSec <= inn || atSec >= out || atSec >= native) return RuleResult(board, null)
         val leftLen = max(0.1, atSec - inn)
         val rightLen = max(0.1, out - atSec)
         val (backed, backedFrame) = withVideoOrig(clip, frame)
         val base = backedFrame ?: frame
-        val leftClip = backed.copy(durationSec = leftLen)
+        val leftClip = backed.copy(durationSec = leftLen, trimInSec = inn)
         val leftFrame = base.copy(
             videoSrc = leftClip.src,
             videoInSec = inn,
@@ -127,7 +127,7 @@ object LyreRules {
             videoOutSec = out,
             durationSec = rightLen,
             origVideoSrc = leftClip.origSrc ?: base.origVideoSrc,
-            origVideoDurationSec = leftClip.origDurationSec ?: base.origVideoDurationSec,
+            origVideoDurationSec = jsOr(leftClip.origDurationSec, jsOr(base.origVideoDurationSec, 0.0)),
         )
         val rightClip = backed.copy(
             id = newId("lc_"),
@@ -206,7 +206,7 @@ object LyreRules {
         val frame = clip.linkedFrameId?.let { findFrame(board, it) }
         val backup = LyreClip.clipBackup(clip, frame) ?: return RuleResult(board, null)
         val liveSrc = clip.src.ifEmpty { frame?.videoSrc.orEmpty() }
-        val liveDur = clip.sourceDurationSec ?: clip.durationSec
+        val liveDur = jsOr(clip.sourceDurationSec, clip.durationSec)
         val nextClip = clip.copy(
             src = backup.first,
             origSrc = liveSrc,
@@ -221,7 +221,7 @@ object LyreRules {
             videoDurationSec = nextClip.sourceDurationSec,
             durationSec = nextClip.durationSec,
         )
-        return RuleResult(replaceClipAndFrame(board, nextClip, nextFrame), null)
+        return RuleResult(retimeLinkedClips(replaceClipAndFrame(board, nextClip, nextFrame)), null)
     }
 
     fun restorePicture(board: BoardData, frameId: String): RuleResult {
@@ -288,7 +288,7 @@ object LyreRules {
             name = clip.name.ifBlank { "Audio" },
             startSec = clip.startSec,
             durationSec = clip.durationSec,
-            sourceDurationSec = clip.sourceDurationSec ?: clip.durationSec,
+            sourceDurationSec = jsOr(clip.sourceDurationSec, clip.durationSec),
             linkedFrameId = clip.linkedFrameId,
         )
         val layers = board.audioLayers.toMutableList()
@@ -361,7 +361,7 @@ object LyreRules {
 
     private fun withVideoOrig(clip: LayerClip, frame: Frame?): Pair<LayerClip, Frame?> {
         val nextClip = if (clip.origSrc.isNullOrEmpty() && clip.src.isNotEmpty()) {
-            clip.copy(origSrc = clip.src, origDurationSec = clip.sourceDurationSec ?: clip.durationSec)
+            clip.copy(origSrc = clip.src, origDurationSec = jsOr(clip.sourceDurationSec, clip.durationSec))
         } else {
             clip
         }
@@ -527,6 +527,10 @@ object LyreRules {
     private fun newId(prefix: String): String {
         val hex = UUID.randomUUID().toString().replace("-", "").take(8)
         return prefix + hex
+    }
+
+    private fun jsOr(value: Double?, fallback: Double): Double {
+        return if (value != null && value != 0.0 && !value.isNaN()) value else fallback
     }
 
     private val BOARD_PREFIX = Regex("""^(boards/[^/]+)""")

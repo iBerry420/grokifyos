@@ -170,6 +170,16 @@ class LyreRulesTest {
         assertNull(trimMovie.plan)
         assertSame(unstitched, trimMovie.board)
 
+        val three = fixture("unstitched_3")
+        val trimmed3 = LyreRules.trim(three, "lc_b", 0.0, 2.0)
+        assertEquals(CutKind.TRIM, trimmed3.plan?.kind)
+        assertEquals(2.0, clipOf(trimmed3.board, "lc_b").durationSec, 0.0)
+        assertEquals(
+            LyreClip.clipOf(trimmed3.board.scenes, "fr_c")!!.start,
+            clipOf(trimmed3.board, "lc_c").startSec,
+            0.0,
+        )
+
         val split = LyreRules.split(unstitched, "lc_b", 1.0)
         assertEquals(CutKind.SPLIT, split.plan?.kind)
         assertEquals(4, split.board.scenes[0].frames.size)
@@ -180,6 +190,17 @@ class LyreRulesTest {
         assertEquals(right.src, rightClip.let { frameOf(split.board, it.linkedFrameId!!).src })
         assertEquals(right.videoSrc, rightClip.src)
         assertEquals(frameOf(split.board, "fr_b").src, right.src)
+        assertEquals(0.0, clipOf(split.board, "lc_b").trimInSec!!, 0.0)
+        assertEquals(frameOf(split.board, "fr_b").videoInSec, clipOf(split.board, "lc_b").trimInSec)
+
+        val zeroSource = replaceClipAndFrame(
+            unstitched,
+            clipOf(unstitched, "lc_b").copy(sourceDurationSec = 0.0),
+            frameOf(unstitched, "fr_b"),
+        )
+        val splitZero = LyreRules.split(zeroSource, "lc_b", 1.0)
+        assertEquals(CutKind.SPLIT, splitZero.plan?.kind)
+        assertEquals(4, splitZero.board.scenes[0].frames.size)
 
         val splitMovie = LyreRules.split(unstitched, "lc_a", 1.0)
         assertNull(splitMovie.plan)
