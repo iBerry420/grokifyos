@@ -1,0 +1,144 @@
+package io.grokify.os.apps.lyre
+
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import org.json.JSONObject
+import java.io.File
+import java.security.MessageDigest
+
+/**
+ * One pending flush file under `lyre/{boardId}/pending/{seq}.json`.
+ *
+ * ```
+ * {"seq":17,"type":"save_board","boardSnapshot":"board.json","createdAtMs":0}
+ * {"seq":18,"type":"storage_put","key":"boards/lyre/clips/lc_b.mp4","localPath":"objects/….mp4"}
+ * {"seq":19,"type":"publish","key":"public/watch/{token}.mp4","localPath":"objects/….mp4"}
+ * ```
+ *
+ * Op types: save_board | storage_put | publish only. Writer enqueues JSON files; network flush is later.
+ */
+data class LyrePendingOp(
+    val seq: Long,
+    val type: String,
+    val boardSnapshot: String? = null,
+    val key: String? = null,
+    val localPath: String? = null,
+    val createdAtMs: Long = 0L,
+)
+
+class LyreCache(
+    ctx: Context,
+    private val api: LyreApi,
+    private val isOnline: () -> Boolean = { networkOnline(ctx.applicationContext) },
+) {
+    private val root = File(ctx.applicationContext.filesDir, "lyre")
+
+    fun boardDir(boardId: String): File {
+        val safe = boardId.replace(UNSAFE, "_").ifBlank { "_" }
+        val dir = File(root, safe)
+        dir.mkdirs()
+        SUBDIRS.forEach { File(dir, it).mkdirs() }
+        return dir
+    }
+
+    fun objectFile(boardId: String, objectKey: String): File {
+        val ext = objectKey.substringAfterLast('.', "").lowercase()
+        val safeExt = if (ext.matches(EXT)) ext else "bin"
+        return File(File(boardDir(boardId), "objects"), "${sha1Hex(objectKey)}.$safeExt")
+    }
+
+    fun writeBoardJson(boardId: String, data: JSONObject) {
+        File(boardDir(boardId), "board.json").writeText(data.toString())
+    }
+
+    fun readBoardJson(boardId: String): JSONObject? {
+        val f = File(boardDir(boardId), "board.json")
+        if (!f.isFile || f.length() <= 0L) return null
+        return try {
+            JSONObject(f.readText())
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Enqueue a pending op as `pending/{seq}.json`. Does not talk to the network.
+     */
+    fun writePending(boardId: String, op: LyrePendingOp): File {
+        val type = op.type
+        require(type == "save_board" || type == "storage_put" || type == "publish") {
+            "unsupported pending type"
+        }
+        val dir = File(boardDir(boardId), "pending")
+        dir.mkdirs()
+        val seq = if (op.seq > 0L) op.seq else nextPendingSeq(dir)
+        val json = JSONObject()
+            .put("seq", seq)
+            .put("type", type)
+            .put("createdAtMs", op.createdAtMs)
+        op.boardSnapshot?.let { json.put("boardSnapshot", it) }
+        op.key?.let { json.put("key", it) }
+        op.localPath?.let { json.put("localPath", it) }
+        val f = File(dir, "$seq.json")
+        f.writeText(json.toString())
+        return f
+    }
+
+    fun resolve(boardId: String, objectKey: String): File? {
+        val dest = objectFile(boardId, objectKey)
+        if (dest.isFile && dest.length() > 0L) return dest
+        if (!isOnline()) return null
+        return try {
+            api.getStorage(objectKey).use { resp ->
+                if (!resp.isSuccessful) return null
+                val body = resp.body ?: return null
+                val part = File(dest.path + ".part")
+                part.parentFile?.mkdirs()
+                part.outputStream().use { out ->
+                    body.byteStream().copyTo(out)
+                }
+                if (part.length() <= 0L) {
+                    part.delete()
+                    return null
+                }
+                if (dest.exists()) dest.delete()
+                if (!part.renameTo(dest)) {
+                    part.copyTo(dest, overwrite = true)
+                    part.delete()
+                }
+                dest.takeIf { it.isFile && it.length() > 0L }
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun nextPendingSeq(dir: File): Long {
+        var max = 0L
+        dir.listFiles()?.forEach { f ->
+            val n = f.name.removeSuffix(".json").toLongOrNull() ?: return@forEach
+            if (n > max) max = n
+        }
+        return max + 1L
+    }
+
+    companion object {
+        private val UNSAFE = Regex("[^A-Za-z0-9._-]")
+        private val EXT = Regex("[a-z0-9]{1,8}")
+        private val SUBDIRS = listOf("objects", "orig", "tmp", "movie-gens", "undo", "pending")
+
+        private fun sha1Hex(value: String): String {
+            val bytes = MessageDigest.getInstance("SHA-1").digest(value.toByteArray(Charsets.UTF_8))
+            return bytes.joinToString("") { b -> "%02x".format(b) }
+        }
+
+        private fun networkOnline(ctx: Context): Boolean {
+            val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                ?: return false
+            val net = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(net) ?: return false
+            return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        }
+    }
+}
