@@ -8,10 +8,25 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/_common.php';
 
+function gos_lyre_pdo_alive(?PDO $pdo): bool
+{
+    if (function_exists('gos_pdo_alive')) {
+        return gos_pdo_alive($pdo);
+    }
+    if (!($pdo instanceof PDO)) {
+        return false;
+    }
+    try {
+        return $pdo->query('SELECT 1') !== false;
+    } catch (Throwable) {
+        return false;
+    }
+}
+
 function gos_lyre_pdo(): PDO
 {
     static $pdo = null;
-    if (gos_pdo_alive($pdo)) {
+    if (gos_lyre_pdo_alive($pdo)) {
         return $pdo;
     }
     $url = (string) (gos_env('GROKIFY_LYRE_DATABASE_URL', '') ?? '');
@@ -402,8 +417,11 @@ function gos_lyre_storage_get(string $rawKey): never
     $errno = curl_errno($ch);
     curl_close($ch);
     if ($streamed) {
-        if ($bytes <= 0) {
-            gos_lyre_json_error('not_found', 404);
+        // Headers already flushed; a JSON error would be appended to the body.
+        $short = is_string($contentLength) && $contentLength !== '' && ctype_digit($contentLength)
+            && $bytes !== (int) $contentLength;
+        if ($ok === false || $errno !== 0 || $bytes <= 0 || $short) {
+            exit;
         }
         exit;
     }

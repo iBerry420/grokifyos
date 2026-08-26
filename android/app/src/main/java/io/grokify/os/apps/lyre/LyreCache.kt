@@ -7,17 +7,7 @@ import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
 
-/**
- * One pending flush file under `lyre/{boardId}/pending/{seq}.json`.
- *
- * ```
- * {"seq":17,"type":"save_board","boardSnapshot":"board.json","createdAtMs":0}
- * {"seq":18,"type":"storage_put","key":"boards/lyre/clips/lc_b.mp4","localPath":"objects/….mp4"}
- * {"seq":19,"type":"publish","key":"public/watch/{token}.mp4","localPath":"objects/….mp4"}
- * ```
- *
- * Op types: save_board | storage_put | publish only. Writer enqueues JSON files; network flush is later.
- */
+/** Pending op types: save_board | storage_put | publish. */
 data class LyrePendingOp(
     val seq: Long,
     val type: String,
@@ -62,9 +52,6 @@ class LyreCache(
         }
     }
 
-    /**
-     * Enqueue a pending op as `pending/{seq}.json`. Does not talk to the network.
-     */
     fun writePending(boardId: String, op: LyrePendingOp): File {
         val type = op.type
         require(type == "save_board" || type == "storage_put" || type == "publish") {
@@ -89,28 +76,36 @@ class LyreCache(
         val dest = objectFile(boardId, objectKey)
         if (dest.isFile && dest.length() > 0L) return dest
         if (!isOnline()) return null
+        val part = File(dest.path + ".part")
+        fun fail(): File? {
+            dest.delete()
+            part.delete()
+            return null
+        }
         return try {
             api.getStorage(objectKey).use { resp ->
-                if (!resp.isSuccessful) return null
-                val body = resp.body ?: return null
-                val part = File(dest.path + ".part")
+                if (!resp.isSuccessful) return fail()
+                val body = resp.body ?: return fail()
+                val expected = resp.header("Content-Length")?.trim()?.toLongOrNull()?.takeIf { it >= 0L }
                 part.parentFile?.mkdirs()
-                part.outputStream().use { out ->
+                val copied = part.outputStream().use { out ->
                     body.byteStream().copyTo(out)
                 }
-                if (part.length() <= 0L) {
-                    part.delete()
-                    return null
+                if (copied <= 0L || part.length() != copied || (expected != null && copied != expected)) {
+                    return fail()
                 }
                 if (dest.exists()) dest.delete()
                 if (!part.renameTo(dest)) {
                     part.copyTo(dest, overwrite = true)
                     part.delete()
                 }
-                dest.takeIf { it.isFile && it.length() > 0L }
+                if (!dest.isFile || dest.length() <= 0L || (expected != null && dest.length() != expected)) {
+                    return fail()
+                }
+                dest
             }
         } catch (_: Exception) {
-            null
+            fail()
         }
     }
 
