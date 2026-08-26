@@ -31,7 +31,22 @@ enum class PluginKind {
  */
 enum class PluginAccent { Cyan, Mint, Violet, Amber, Rose, Blue }
 
-enum class PluginIconKey { Wifi, Bluetooth, Place, Music, Apps, Extension, Chart, Watch }
+enum class PluginIconKey {
+    Wifi,
+    Bluetooth,
+    Place,
+    Music,
+    Apps,
+    Assistant,
+    Avatar,
+    Extension,
+    Chart,
+    Watch,
+    CexBot,
+    Bot,
+    Forum,
+    Lyre,
+}
 
 /**
  * API key a plugin needs from the host vault.

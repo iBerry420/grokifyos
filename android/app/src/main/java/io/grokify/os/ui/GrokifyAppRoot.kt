@@ -61,7 +61,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
@@ -73,11 +72,9 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Apps
-import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.automirrored.filled.Notes
 import androidx.compose.material.icons.filled.Key
-import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.ScreenLockPortrait
@@ -85,13 +82,12 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
-import androidx.compose.material.icons.filled.Extension
-import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.LinkOff
 import io.grokify.os.apps.BluetoothScannerPane
 import io.grokify.os.apps.CexBotPane
+import io.grokify.os.apps.discord.DiscordPane
+import io.grokify.os.apps.gbot.GbotPane
 import io.grokify.os.apps.GrokAssistantPane
 import io.grokify.os.apps.LocationNotesPane
 import io.grokify.os.apps.SpaceXaiUsageAnalyzerPane
@@ -100,7 +96,8 @@ import io.grokify.os.apps.WifiScannerPane
 import io.grokify.os.apps.companion.CompanionPane
 import io.grokify.os.apps.plugin.BuiltinPluginCatalog
 import io.grokify.os.apps.plugin.PluginAccent
-import io.grokify.os.apps.plugin.PluginIconKey
+import io.grokify.os.apps.plugin.PluginFavicon
+import io.grokify.os.apps.plugin.PluginFaviconImage
 import io.grokify.os.apps.plugin.PluginManifest
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.ui.input.pointer.pointerInput
@@ -140,6 +137,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -189,6 +187,11 @@ import kotlinx.coroutines.launch
  * visible (avoids jump-to-top flicker on every stream token); only jump when
  * the row is off-screen. Optional [extraBottomPx] clears room for action bars.
  */
+private data class GrokifyNavFrame(
+    val tab: Int,
+    val appsScreen: String?,
+)
+
 private suspend fun LazyListState.ensureItemBottomVisible(
     index: Int,
     extraBottomPx: Int = 0,
@@ -279,16 +282,7 @@ fun GrokifyAppRoot(
     var tab by remember { mutableIntStateOf(1) } // default Chat
     /** null = Apps hub; else built-in mini-app id (kept while on other tabs). */
     var appsScreen by remember { mutableStateOf<String?>(null) }
-    // Home-screen widgets can request an inner app (and Spotify tab).
-    val widgetNav by io.grokify.os.widgets.WidgetNav.pending.collectAsState()
-    LaunchedEffect(widgetNav) {
-        val req = widgetNav ?: return@LaunchedEffect
-        onCloseSettings()
-        onSetPanel(ChatPanel.None)
-        tab = 2
-        appsScreen = req.pluginId
-        io.grokify.os.widgets.WidgetNav.consume()
-    }
+    val navStack = remember { mutableStateListOf<GrokifyNavFrame>() }
     var tokenDraft by remember { mutableStateOf(state.token) }
     var chatDraft by remember { mutableStateOf("") }
     var renameOpen by remember { mutableStateOf(false) }
@@ -297,36 +291,68 @@ fun GrokifyAppRoot(
     var notifAccessPrompted by remember { mutableStateOf(false) }
     /** Chat double-back → minimize; timestamp of first back press. */
     var chatBackPressMs by remember { mutableLongStateOf(0L) }
+    fun pushNav(nextTab: Int, nextScreen: String?) {
+        if (tab == nextTab && appsScreen == nextScreen) {
+            onCloseSettings()
+            onSetPanel(ChatPanel.None)
+            return
+        }
+        val cur = GrokifyNavFrame(tab, appsScreen)
+        if (navStack.lastOrNull() != cur) {
+            navStack.add(cur)
+            while (navStack.size > 32) navStack.removeAt(0)
+        }
+        tab = nextTab
+        appsScreen = nextScreen
+        onCloseSettings()
+        onSetPanel(ChatPanel.None)
+        chatBackPressMs = 0L
+    }
+    fun popNav(): Boolean {
+        while (navStack.isNotEmpty()) {
+            val prev = navStack.removeAt(navStack.lastIndex)
+            if (prev.tab != tab || prev.appsScreen != appsScreen) {
+                tab = prev.tab
+                appsScreen = prev.appsScreen
+                onCloseSettings()
+                onSetPanel(ChatPanel.None)
+                chatBackPressMs = 0L
+                return true
+            }
+        }
+        return false
+    }
+    // Home-screen widgets can request an inner app (and Spotify tab).
+    val widgetNav by io.grokify.os.widgets.WidgetNav.pending.collectAsState()
+    LaunchedEffect(widgetNav) {
+        val req = widgetNav ?: return@LaunchedEffect
+        pushNav(2, req.pluginId)
+        io.grokify.os.widgets.WidgetNav.consume()
+    }
     val context = LocalContext.current
     val density = LocalDensity.current
     val imeBottom = WindowInsets.ime.getBottom(density)
     val keyboardOpen = imeBottom > 0
 
-    // System back: inner app → Apps hub → Chat; Chat double-press → background.
+    // System back: overlays, then previous pane, then Chat double-press to background.
     BackHandler {
         when {
             state.showSettings -> onCloseSettings()
             state.panel != ChatPanel.None -> onSetPanel(ChatPanel.None)
             renameOpen -> renameOpen = false
             notifAccessDialogOpen -> notifAccessDialogOpen = false
+            popNav() -> Unit
             tab == 2 && appsScreen != null -> {
                 appsScreen = null
                 chatBackPressMs = 0L
             }
-            tab == 2 -> {
-                // Apps hub → Chat
-                tab = 1
-                chatBackPressMs = 0L
-            }
             tab != 1 -> {
-                // Home / Update → Chat
                 tab = 1
                 onCloseSettings()
                 onSetPanel(ChatPanel.None)
                 chatBackPressMs = 0L
             }
             else -> {
-                // Chat: first back arms minimize; second within 2s sends app to background.
                 val now = System.currentTimeMillis()
                 if (now - chatBackPressMs in 1 until 2_000L) {
                     chatBackPressMs = 0L
@@ -450,9 +476,7 @@ fun GrokifyAppRoot(
                         NavigationBarItem(
                             selected = !state.showSettings && tab == 0,
                             onClick = {
-                                tab = 0
-                                onCloseSettings()
-                                onSetPanel(ChatPanel.None)
+                                pushNav(0, appsScreen)
                             },
                             icon = { Icon(Icons.Default.Home, null) },
                             label = { Text("Home", fontSize = 11.sp) },
@@ -461,8 +485,7 @@ fun GrokifyAppRoot(
                         NavigationBarItem(
                             selected = !state.showSettings && tab == 1,
                             onClick = {
-                                tab = 1
-                                onCloseSettings()
+                                pushNav(1, appsScreen)
                             },
                             icon = { Icon(Icons.AutoMirrored.Filled.Chat, null) },
                             label = { Text("Chat", fontSize = 11.sp) },
@@ -480,25 +503,24 @@ fun GrokifyAppRoot(
                         NavigationBarItem(
                             selected = !state.showSettings && tab == 2,
                             onClick = {
-                                onCloseSettings()
-                                onSetPanel(ChatPanel.None)
                                 if (tab == 2 && appsScreen != null) {
                                     // Viewing an inner app → back to Apps hub.
-                                    appsScreen = null
+                                    pushNav(2, null)
                                 } else {
                                     // Resume last app (or hub if none).
-                                    tab = 2
+                                    pushNav(2, appsScreen)
                                 }
                             },
                             icon = {
-                                Icon(
-                                    if (showLastAppOnTab) {
-                                        pluginIcon(lastAppManifest!!.icon)
-                                    } else {
-                                        Icons.Default.Apps
-                                    },
-                                    contentDescription = null,
-                                )
+                                if (showLastAppOnTab) {
+                                    PluginFaviconImage(
+                                        pluginId = lastAppManifest!!.id,
+                                        fallback = lastAppManifest.icon,
+                                        modifier = Modifier.size(24.dp),
+                                    )
+                                } else {
+                                    Icon(Icons.Default.Apps, contentDescription = null)
+                                }
                             },
                             label = {
                                 Text(
@@ -516,10 +538,7 @@ fun GrokifyAppRoot(
                         NavigationBarItem(
                             selected = !state.showSettings && tab == 3,
                             onClick = {
-                                tab = 3
-                                appsScreen = null
-                                onCloseSettings()
-                                onSetPanel(ChatPanel.None)
+                                pushNav(3, null)
                             },
                             icon = { Icon(Icons.Default.SystemUpdate, null) },
                             label = { Text("Update", fontSize = 11.sp) },
@@ -617,10 +636,14 @@ fun GrokifyAppRoot(
                             if (BuiltinPluginCatalog.isKnown(resolved) ||
                                 resolved == "spotify_controller"
                             ) {
-                                appsScreen = resolved
+                                pushNav(2, resolved)
                             }
                         },
-                        onBackToHub = { appsScreen = null },
+                        onBackToHub = {
+                            if (!popNav()) {
+                                appsScreen = null
+                            }
+                        },
                         onSetAppOrder = onSetAppOrder,
                         onRequestWifiPerms = {
                             // Single system dialog: nearby Wi‑Fi + location (OEM-friendly).
@@ -651,6 +674,15 @@ fun GrokifyAppRoot(
                         },
                         onRequestNotifPerms = {
                             onEnsurePermissions(listOf(AppPermissionId.NOTIFICATIONS.id))
+                        },
+                        onRequestLyrePerms = {
+                            onEnsurePermissions(
+                                listOf(
+                                    AppPermissionId.CAMERA.id,
+                                    AppPermissionId.MICROPHONE.id,
+                                    AppPermissionId.MEDIA.id,
+                                ),
+                            )
                         },
                     )
                     3 -> UpdatePane(
@@ -2238,6 +2270,18 @@ private fun HistoryPanel(
                             s.messageCount == 1 -> "1 msg"
                             else -> "${s.messageCount} msgs"
                         }
+                        val tokenBits = buildList {
+                            if (s.inputTokens > 0L) {
+                                val mark = if (s.tokensEstimated) "~" else ""
+                                add(mark + UsageFormat.compactTokens(s.inputTokens) + " in")
+                            }
+                            if (s.lastContextTokens > 0L) {
+                                add(UsageFormat.compactTokens(s.lastContextTokens) + " ctx")
+                            }
+                            if (s.wallTimeS > 0L) {
+                                add(UsageFormat.compactDuration(s.wallTimeS))
+                            }
+                        }.joinToString(" · ")
                         Row(
                             Modifier
                                 .fillMaxWidth()
@@ -2271,6 +2315,16 @@ private fun HistoryPanel(
                                     fontSize = 11.sp,
                                     fontFamily = FontFamily.Monospace,
                                 )
+                                if (tokenBits.isNotEmpty()) {
+                                    Text(
+                                        tokenBits,
+                                        color = GrokifyColors.GlowCyan.copy(alpha = 0.85f),
+                                        fontSize = 11.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
                             }
                             IconButton(onClick = { onDelete(s.id) }) {
                                 Icon(
@@ -3907,6 +3961,8 @@ private fun UsageCard(
                     }
                 }
 
+                UsageTrackerSection(usage.tracker)
+
                 Text(
                     "Switch accounts or re-auth: signs out Grok Build on this server and opens a fresh OAuth link.",
                     color = GrokifyColors.TextDim,
@@ -4645,6 +4701,7 @@ private fun AppsPane(
     onRequestBtPerms: () -> Unit,
     onRequestPlacePerms: () -> Unit,
     onRequestNotifPerms: () -> Unit = {},
+    onRequestLyrePerms: () -> Unit = {},
 ) {
     val resolved = when (screen) {
         "spotify_dj" -> BuiltinPluginCatalog.SPOTIFY_CONTROLLER
@@ -4681,6 +4738,16 @@ private fun AppsPane(
         )
         BuiltinPluginCatalog.CEXBOT, "cexbot" -> CexBotPane(
             onBack = onBackToHub,
+        )
+        BuiltinPluginCatalog.GBOT, "gbot" -> GbotPane(
+            onBack = onBackToHub,
+        )
+        BuiltinPluginCatalog.DISCORD, "discord" -> DiscordPane(
+            onBack = onBackToHub,
+        )
+        BuiltinPluginCatalog.LYRE, "lyre" -> io.grokify.os.apps.lyre.LyrePane(
+            onBack = onBackToHub,
+            onRequestPermissions = onRequestLyrePerms,
         )
         else -> AppsHub(
             appOrder = appOrder,
@@ -4847,16 +4914,22 @@ private fun BuiltinAppTile(
     ) {
         Box(
             Modifier
-                .size(44.dp)
+                .size(48.dp)
                 .clip(RoundedCornerShape(12.dp))
-                .background(accent.copy(alpha = 0.12f + elevationAlpha)),
+                .background(
+                    if (PluginFavicon.drawableRes(app.id) == null) {
+                        accent.copy(alpha = 0.12f + elevationAlpha)
+                    } else {
+                        Color.Transparent
+                    },
+                ),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(
-                pluginIcon(app.icon),
-                contentDescription = null,
-                tint = accent,
-                modifier = Modifier.size(24.dp),
+            PluginFaviconImage(
+                pluginId = app.id,
+                fallback = app.icon,
+                modifier = Modifier.size(if (PluginFavicon.drawableRes(app.id) != null) 48.dp else 24.dp),
+                fallbackTint = accent,
             )
         }
         Spacer(Modifier.width(12.dp))
@@ -4893,17 +4966,6 @@ private fun pluginAccentColor(accent: PluginAccent): Color = when (accent) {
     PluginAccent.Blue -> GrokifyColors.GlowBlue
 }
 
-private fun pluginIcon(key: PluginIconKey): ImageVector = when (key) {
-    PluginIconKey.Wifi -> Icons.Default.Wifi
-    PluginIconKey.Bluetooth -> Icons.Default.Bluetooth
-    PluginIconKey.Place -> Icons.Default.Place
-    PluginIconKey.Music -> Icons.Default.MusicNote
-    PluginIconKey.Apps -> Icons.Default.Apps
-    PluginIconKey.Extension -> Icons.Default.Extension
-    PluginIconKey.Chart -> Icons.Default.BarChart
-    PluginIconKey.Watch -> Icons.Filled.SystemUpdate
-}
-
 /** Compact bottom-nav label for a last-opened mini-app (fits under the icon). */
 private fun appsNavShortTitle(app: PluginManifest): String = when (app.id) {
     BuiltinPluginCatalog.WIFI_SCANNER -> "Wi‑Fi"
@@ -4915,6 +4977,8 @@ private fun appsNavShortTitle(app: PluginManifest): String = when (app.id) {
     BuiltinPluginCatalog.COMPANION -> "Companion"
     BuiltinPluginCatalog.WATCH_DEPLOY -> "Watch"
     BuiltinPluginCatalog.CEXBOT -> "CexBot"
+    BuiltinPluginCatalog.GBOT -> "Grok Bot"
+    BuiltinPluginCatalog.DISCORD -> "Discord"
     else -> app.title.take(12)
 }
 

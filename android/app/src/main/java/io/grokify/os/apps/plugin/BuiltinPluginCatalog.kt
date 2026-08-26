@@ -14,6 +14,9 @@ object BuiltinPluginCatalog {
     const val COMPANION = "companion"
     const val WATCH_DEPLOY = "watch_deploy"
     const val CEXBOT = "cexbot"
+    const val GBOT = "gbot"
+    const val DISCORD = "discord"
+    const val LYRE = "lyre"
 
     val all: List<PluginManifest> = listOf(
         PluginManifest(
@@ -113,7 +116,7 @@ object BuiltinPluginCatalog {
             hostModuleId = GROK_ASSISTANT,
             capabilities = listOf("AI", "Voice", "Chat"),
             accent = PluginAccent.Violet,
-            icon = PluginIconKey.Apps,
+            icon = PluginIconKey.Assistant,
             featured = true,
             requiredKeys = listOf(
                 PluginRequiredKey(
@@ -134,7 +137,7 @@ object BuiltinPluginCatalog {
             hostModuleId = COMPANION,
             capabilities = listOf("AI", "Voice", "Chat", "Avatar"),
             accent = PluginAccent.Rose,
-            icon = PluginIconKey.Apps,
+            icon = PluginIconKey.Avatar,
             featured = true,
             requiredKeys = listOf(
                 PluginRequiredKey(
@@ -168,8 +171,55 @@ object BuiltinPluginCatalog {
             hostModuleId = CEXBOT,
             capabilities = listOf("Trading", "AI"),
             accent = PluginAccent.Amber,
-            icon = PluginIconKey.Chart,
+            icon = PluginIconKey.CexBot,
             featured = true,
+        ),
+        PluginManifest(
+            id = GBOT,
+            title = "Grok Bot",
+            subtitle = "Chat-first gbot control plane: bots, approvals, computer, MCP.",
+            version = "1.0.0",
+            source = PluginSource.Builtin,
+            kind = PluginKind.HostModule,
+            hostModuleId = GBOT,
+            capabilities = listOf("AI", "Chat", "Approvals", "VNC"),
+            accent = PluginAccent.Violet,
+            icon = PluginIconKey.Bot,
+            featured = true,
+        ),
+        PluginManifest(
+            id = DISCORD,
+            title = "Discord",
+            subtitle = "Manage Avalynn Discord ingest: bots, selfbots, feed, guilds, users, emoji, role pickers, captchas, audits, AI tag + analyze, SpaceXAI/bridge models.",
+            version = "1.0.0",
+            source = PluginSource.Builtin,
+            kind = PluginKind.HostModule,
+            hostModuleId = DISCORD,
+            capabilities = listOf("Discord", "Bots", "Moderation", "AI"),
+            accent = PluginAccent.Violet,
+            icon = PluginIconKey.Forum,
+            featured = true,
+        ),
+        PluginManifest(
+            id = LYRE,
+            title = "LYRE",
+            subtitle = "Native storyboard editor: rails, local cut, Imagine, watch link.",
+            version = "1.0.0",
+            source = PluginSource.Builtin,
+            kind = PluginKind.HostModule,
+            hostModuleId = LYRE,
+            capabilities = listOf("Video", "AI", "Camera", "Media"),
+            accent = PluginAccent.Rose,
+            icon = PluginIconKey.Lyre,
+            featured = true,
+            requiredKeys = listOf(
+                PluginRequiredKey(
+                    id = "spacexai_api_key",
+                    label = "SpaceXAI API key",
+                    description = "Backup Imagine (stills + video) when me.grokpot.io fails. Muse uses Grok Build without it.",
+                    required = false,
+                ),
+            ),
         ),
     )
 

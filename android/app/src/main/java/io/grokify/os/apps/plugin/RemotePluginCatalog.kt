@@ -175,9 +175,15 @@ object RemotePluginCatalog {
         "bluetooth", "bt" -> PluginIconKey.Bluetooth
         "place", "location" -> PluginIconKey.Place
         "music", "spotify" -> PluginIconKey.Music
+        "assistant", "grok", "grok_assistant" -> PluginIconKey.Assistant
+        "companion", "avatar" -> PluginIconKey.Avatar
         "extension", "script", "plugin" -> PluginIconKey.Extension
         "chart", "usage", "analytics", "billing" -> PluginIconKey.Chart
         "watch", "wear", "watch_deploy" -> PluginIconKey.Watch
+        "cexbot", "trade" -> PluginIconKey.CexBot
+        "bot", "gbot", "grok_bot" -> PluginIconKey.Bot
+        "forum", "discord" -> PluginIconKey.Forum
+        "lyre" -> PluginIconKey.Lyre
         else -> PluginIconKey.Apps
     }
 }
