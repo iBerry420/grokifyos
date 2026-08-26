@@ -4,6 +4,7 @@ import android.app.Application
 import io.grokify.os.GrokifyApp
 import io.grokify.os.data.TokenStore
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -35,11 +36,15 @@ class LyreSession(
     private val appCtx = app.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
+    private val flushMutex = Mutex()
+    private val boardEpoch = AtomicInteger(0)
     private val cutter: LyreCutter = cutterOverride ?: Media3LyreCutter(appCtx) {
         File(cache.boardDir(requireBoardId()), "tmp")
     }
     private val undo = LyreUndo(cache)
-    private val gens = LyreMovieGens(cache, { file -> cutter.probe(file) }, ::enqueuePendingFor)
+    private val gens = LyreMovieGens(cache, { file -> cutter.probe(file) }) { bid, op ->
+        enqueuePendingFor(bid, op)
+    }
 
     private val _board = MutableStateFlow<BoardData?>(null)
     val board: StateFlow<BoardData?> = _board
@@ -60,6 +65,7 @@ class LyreSession(
     }
 
     fun bind(boardId: String, board: BoardData) {
+        boardEpoch.incrementAndGet()
         _boardId.value = boardId
         _board.value = board
         cache.writeBoardJson(boardId, LyreBoardCodec.encode(board))
@@ -67,27 +73,32 @@ class LyreSession(
     }
 
     fun apply(result: RuleResult) {
+        if (_busy.value != null) return
+        val epoch = boardEpoch.get()
         running = scope.launch {
-            mutex.withLock { applyLocked(result) }
+            mutex.withLock { applyLocked(result, epoch) }
         }
     }
 
     suspend fun applyAwait(result: RuleResult) {
-        mutex.withLock { applyLocked(result) }
+        val epoch = boardEpoch.get()
+        mutex.withLock { applyLocked(result, epoch) }
     }
 
     fun flushSave() {
+        if (_busy.value != null) return
         val id = _boardId.value ?: return
         val b = _board.value ?: return
-        cache.writeBoardJson(id, LyreBoardCodec.encode(b))
+        val data = LyreBoardCodec.encode(b)
+        cache.writeBoardJson(id, data)
         enqueuePendingFor(
             id,
             LyrePendingOp(
                 seq = 0,
                 type = "save_board",
-                boardSnapshot = "board.json",
                 createdAtMs = System.currentTimeMillis(),
             ),
+            snapshotJson = data,
         )
         scope.launch { flushPending(id) }
     }
@@ -100,9 +111,11 @@ class LyreSession(
     fun undo() {
         scope.launch {
             mutex.withLock {
+                if (_busy.value != null) return@withLock
                 val id = _boardId.value ?: return@withLock
                 val entry = undo.popLast(id) ?: return@withLock
                 val restored = LyreBoardCodec.decode(JSONObject(entry.boardBefore))
+                boardEpoch.incrementAndGet()
                 _board.value = restored
                 cache.writeBoardJson(id, JSONObject(entry.boardBefore))
                 activity(id, "undo", "Undo ${entry.type.name.lowercase()}", null, null, null)
@@ -117,68 +130,92 @@ class LyreSession(
 
     fun movieGens(): LyreMovieGens = gens
 
-    private suspend fun applyLocked(result: RuleResult) {
+    private suspend fun applyLocked(result: RuleResult, capturedEpoch: Int) {
         val id = _boardId.value ?: return
         val boardBefore = _board.value ?: return
+        if (capturedEpoch != boardEpoch.get()) return
         if (result.plan == null && result.board === boardBefore) return
         val plan = result.plan
+        _busy.value = LyreJob(plan?.kind ?: CutKind.TRIM, id)
         val beforeJson = LyreBoardCodec.encode(boardBefore).toString()
         val liveKeys = changingKeys(boardBefore, result, plan)
         val staging = undo.stage(id, undoTypeOf(plan), beforeJson, liveKeys)
+        var patched: BoardData? = null
         try {
-            if (plan?.kind == CutKind.STITCH) {
-                val movie = boardBefore.movie
-                if (movie != null && !gens.ensureCurrent(movie, id)) {
-                    undo.discard(staging)
-                    fail(id, boardBefore, "cut_failed: stitch_snapshot", stitchFrameId(boardBefore, plan))
-                    return
+            try {
+                if (plan?.kind == CutKind.STITCH) {
+                    val movie = boardBefore.movie
+                    if (movie != null && !gens.ensureCurrent(movie, id)) {
+                        undo.discard(staging)
+                        fail(id, boardBefore, "cut_failed: stitch_snapshot", stitchFrameId(boardBefore, plan))
+                        return
+                    }
                 }
-            }
-            val patched = if (plan == null) {
-                result.board
-            } else {
-                _busy.value = LyreJob(plan.kind, id)
-                try {
+                patched = if (plan == null) {
+                    result.board
+                } else {
                     runPlan(id, boardBefore, result, plan)
-                } finally {
-                    _busy.value = null
                 }
+            } catch (e: CancellationException) {
+                abortCut(id, staging, boardBefore, result, plan, e.message)
+                throw e
+            } catch (e: CutFailedException) {
+                abortCut(id, staging, boardBefore, result, plan, e.message)
+                return
+            } catch (e: Exception) {
+                val reason = when (plan?.kind) {
+                    CutKind.POP -> "cut_failed: pop_rebuild"
+                    CutKind.STITCH -> "cut_failed: stitch"
+                    else -> "cut_failed: stitch"
+                }
+                abortCut(id, staging, boardBefore, result, plan, reason)
+                return
             }
-            val afterJson = LyreBoardCodec.encode(patched).toString()
-            undo.push(staging, afterJson)
-            undo.dropOldestBeyond(id)
-            commit(id, patched)
-            activity(
-                id,
-                (plan?.kind ?: CutKind.TRIM).name.lowercase(),
-                plan?.kind?.name?.lowercase() ?: "edit",
-                patched.activeSceneId,
-                operatedFrameId(boardBefore, result, plan),
-                plan?.clipKey,
-            )
-            cache.evict(id, keepKeys(patched, id))
-            scope.launch { flushPending(id) }
-        } catch (e: CancellationException) {
-            undo.discard(staging)
-            val reason = e.message?.takeIf { it.startsWith("cut_failed:") } ?: "cut_failed: stitch"
-            fail(id, boardBefore, reason, operatedFrameId(boardBefore, result, plan))
-            throw e
-        } catch (e: CutFailedException) {
-            undo.discard(staging)
-            fail(
-                id,
-                boardBefore,
-                e.message ?: "cut_failed: stitch",
-                operatedFrameId(boardBefore, result, plan),
-            )
-        } catch (e: Exception) {
-            undo.discard(staging)
-            val reason = when (plan?.kind) {
-                CutKind.POP -> "cut_failed: pop_rebuild"
-                CutKind.STITCH -> "cut_failed: stitch"
-                else -> "cut_failed: stitch"
+            val committed = patched ?: return
+            try {
+                val afterJson = LyreBoardCodec.encode(committed).toString()
+                undo.push(staging, afterJson)
+                undo.dropOldestBeyond(id)
+                commit(id, committed)
+                activity(
+                    id,
+                    (plan?.kind ?: CutKind.TRIM).name.lowercase(),
+                    plan?.kind?.name?.lowercase() ?: "edit",
+                    committed.activeSceneId,
+                    operatedFrameId(boardBefore, result, plan),
+                    plan?.clipKey,
+                )
+                cache.evict(id, keepKeys(committed, id))
+                scope.launch { flushPending(id) }
+            } catch (e: CancellationException) {
+                finishCutOk(id, staging, committed)
+                throw e
+            } catch (_: Exception) {
+                finishCutOk(id, staging, committed)
             }
-            fail(id, boardBefore, reason, operatedFrameId(boardBefore, result, plan))
+        } finally {
+            _busy.value = null
+        }
+    }
+
+    private fun abortCut(
+        id: String,
+        staging: UndoStaging,
+        boardBefore: BoardData,
+        result: RuleResult,
+        plan: CutPlan?,
+        reason: String?,
+    ) {
+        runCatching { undo.restoreLive(id, staging) }
+        undo.discard(staging)
+        val msg = reason?.takeIf { it.startsWith("cut_failed:") } ?: "cut_failed: stitch"
+        fail(id, boardBefore, msg, operatedFrameId(boardBefore, result, plan))
+    }
+
+    private fun finishCutOk(id: String, staging: UndoStaging, committed: BoardData) {
+        runCatching {
+            undo.push(staging, LyreBoardCodec.encode(committed).toString())
+            commit(id, committed)
         }
     }
 
@@ -218,6 +255,7 @@ class LyreSession(
         }
         val dest = cache.objectFile(id, movieKey)
         cache.moveReplace(cut.file, dest)
+        enqueueMoviePut(id, movieKey)
         val placed = CutOk(dest, cut.durationSec, cut.fps)
         val n = result.board.movie?.parts?.size?.minus(1) ?: 1
         gens.push(id, n, placed, partCount = n + 1)
@@ -254,6 +292,7 @@ class LyreSession(
         if (restored != null) {
             val dest = cache.objectFile(id, compiled)
             cache.copyReplace(restored, dest)
+            enqueueMoviePut(id, compiled)
             val meta = gens.durationFps(id, n)
             val p = meta ?: cutter.probe(dest).let { it.durationSec to it.fps }
             gens.dropAbove(id, n)
@@ -276,6 +315,7 @@ class LyreSession(
         }
         val dest = cache.objectFile(id, compiled)
         cache.moveReplace(cut.file, dest)
+        enqueueMoviePut(id, compiled)
         val placed = CutOk(dest, cut.durationSec, cut.fps)
         gens.push(id, n, placed, partCount = remaining.size)
         gens.dropAbove(id, n)
@@ -351,14 +391,26 @@ class LyreSession(
         enqueuePendingFor(id, LyrePendingOp(0, "storage_put", key = leftKey, localPath = cache.objectRel(id, leftKey)))
         enqueuePendingFor(id, LyrePendingOp(0, "storage_put", key = rightKey, localPath = cache.objectRel(id, rightKey)))
         val oldIds = boardBefore.videoLayers.flatMap { it.clips }.map { it.id }.toSet()
-        val leftClip = findClipBySrc(result.board, clipKey) ?: findClip(boardBefore, clipKey)
+        val leftClip = findClip(boardBefore, clipKey)
         val rightClip = result.board.videoLayers.flatMap { it.clips }.firstOrNull { it.id !in oldIds }
         var next = result.board
         if (leftClip != null) {
-            next = dualWriteClip(next, leftClip.src, leftKey, CutOk(cache.objectFile(id, leftKey), left.durationSec, left.fps), inPointZero = true)
+            next = dualWriteClipById(
+                next,
+                leftClip.id,
+                leftKey,
+                CutOk(cache.objectFile(id, leftKey), left.durationSec, left.fps),
+                inPointZero = true,
+            )
         }
         if (rightClip != null) {
-            next = dualWriteClip(next, rightClip.src, rightKey, CutOk(cache.objectFile(id, rightKey), right.durationSec, right.fps), inPointZero = true)
+            next = dualWriteClipById(
+                next,
+                rightClip.id,
+                rightKey,
+                CutOk(cache.objectFile(id, rightKey), right.durationSec, right.fps),
+                inPointZero = true,
+            )
         }
         return LyreRules.retimeLinkedClips(next)
     }
@@ -449,6 +501,46 @@ class LyreSession(
         return LyreRules.retimeLinkedClips(board.copy(videoLayers = layers, scenes = scenes))
     }
 
+    private fun dualWriteClipById(
+        board: BoardData,
+        clipId: String,
+        newSrc: String,
+        cut: CutOk,
+        inPointZero: Boolean,
+    ): BoardData {
+        val frameId = board.videoLayers.flatMap { it.clips }.firstOrNull { it.id == clipId }?.linkedFrameId
+        val layers = board.videoLayers.map { layer ->
+            layer.copy(
+                clips = layer.clips.map { clip ->
+                    if (clip.id != clipId) return@map clip
+                    clip.copy(
+                        src = newSrc,
+                        durationSec = cut.durationSec,
+                        sourceDurationSec = cut.durationSec,
+                        trimInSec = if (inPointZero) 0.0 else clip.trimInSec,
+                    )
+                },
+            )
+        }
+        val scenes = board.scenes.map { scene ->
+            scene.copy(
+                frames = scene.frames.map { frame ->
+                    if (frameId == null || frame.id != frameId) return@map frame
+                    frame.copy(
+                        videoSrc = newSrc,
+                        durationSec = cut.durationSec,
+                        videoDurationSec = cut.durationSec,
+                        videoFps = cut.fps,
+                        videoInSec = if (inPointZero) 0.0 else frame.videoInSec,
+                        videoOutSec = if (inPointZero) cut.durationSec else frame.videoOutSec,
+                        videoGeneratingError = null,
+                    )
+                },
+            )
+        }
+        return LyreRules.retimeLinkedClips(board.copy(videoLayers = layers, scenes = scenes))
+    }
+
     private fun patchAudioDuration(board: BoardData, src: String, durationSec: Double): BoardData {
         val layers = board.audioLayers.map { layer ->
             layer.copy(
@@ -477,63 +569,86 @@ class LyreSession(
 
     private fun fail(id: String, boardBefore: BoardData, reason: String, frameId: String?) {
         val next = if (frameId == null) boardBefore else setError(boardBefore, frameId, reason)
+        boardEpoch.incrementAndGet()
         _board.value = next
         cache.writeBoardJson(id, LyreBoardCodec.encode(next))
         activity(id, "cut_failed", reason, next.activeSceneId, frameId, null)
     }
 
     private fun commit(id: String, board: BoardData) {
+        boardEpoch.incrementAndGet()
         _board.value = board
-        cache.writeBoardJson(id, LyreBoardCodec.encode(board))
+        val data = LyreBoardCodec.encode(board)
+        cache.writeBoardJson(id, data)
         enqueuePendingFor(
             id,
             LyrePendingOp(
                 seq = 0,
                 type = "save_board",
-                boardSnapshot = "board.json",
                 createdAtMs = System.currentTimeMillis(),
+            ),
+            snapshotJson = data,
+        )
+    }
+
+    private fun enqueueMoviePut(boardId: String, movieKey: String) {
+        enqueuePendingFor(
+            boardId,
+            LyrePendingOp(
+                seq = 0,
+                type = "storage_put",
+                key = movieKey,
+                localPath = cache.objectRel(boardId, movieKey),
             ),
         )
     }
 
-    private fun enqueuePendingFor(boardId: String, op: LyrePendingOp) {
-        cache.writePending(boardId, op.copy(createdAtMs = if (op.createdAtMs == 0L) System.currentTimeMillis() else op.createdAtMs))
+    private fun enqueuePendingFor(boardId: String, op: LyrePendingOp, snapshotJson: JSONObject? = null) {
+        cache.writePending(
+            boardId,
+            op.copy(createdAtMs = if (op.createdAtMs == 0L) System.currentTimeMillis() else op.createdAtMs),
+            snapshotJson,
+        )
     }
 
-    private fun flushPending(boardId: String) {
-        val ops = cache.listPending(boardId)
-        val latestSave = ops.filter { it.second.type == "save_board" }.maxOfOrNull { it.second.seq }
-        for ((file, op) in ops) {
-            if (op.type == "save_board" && latestSave != null && op.seq != latestSave) {
-                cache.deletePending(file)
-                continue
-            }
-            val ok = runCatching {
-                when (op.type) {
-                    "save_board" -> {
-                        val data = cache.readBoardJson(boardId) ?: return@runCatching false
-                        val resp = api.saveBoard(boardId, data)
-                        resp.optBoolean("ok", false)
-                    }
-                    "storage_put", "publish" -> {
-                        if (!cache.online()) return@runCatching false
-                        val key = op.key ?: return@runCatching false
-                        val local = cache.pendingFile(op, boardId) ?: return@runCatching false
-                        val resp = api.putStorage(key, local)
-                        resp.optBoolean("ok", false)
-                    }
-                    else -> false
-                }
-            }.getOrDefault(false)
-            if (ok) {
-                cache.deletePending(file)
-            } else {
-                val fails = op.failCount + 1
-                if (fails >= 5) {
+    private suspend fun flushPending(boardId: String) {
+        flushMutex.withLock {
+            val ops = cache.listPending(boardId)
+            val latestSave = ops.filter { it.second.type == "save_board" }.maxOfOrNull { it.second.seq }
+            for ((file, op) in ops) {
+                if (op.type == "save_board" && latestSave != null && op.seq != latestSave) {
                     cache.deletePending(file)
-                    activity(boardId, "pending_drop", "dropped ${op.type} after 5 failures", null, null, op.key)
+                    continue
+                }
+                val ok = runCatching {
+                    when (op.type) {
+                        "save_board" -> {
+                            val data = cache.readPendingSnapshot(boardId, op)
+                                ?: cache.readBoardJson(boardId)
+                                ?: return@runCatching false
+                            val resp = api.saveBoard(boardId, data)
+                            resp.optBoolean("ok", false)
+                        }
+                        "storage_put", "publish" -> {
+                            if (!cache.online()) return@runCatching false
+                            val key = op.key ?: return@runCatching false
+                            val local = cache.pendingFile(op, boardId) ?: return@runCatching false
+                            val resp = api.putStorage(key, local)
+                            resp.optBoolean("ok", false)
+                        }
+                        else -> false
+                    }
+                }.getOrDefault(false)
+                if (ok) {
+                    cache.deletePending(file)
                 } else {
-                    cache.writePending(boardId, op.copy(failCount = fails))
+                    val fails = op.failCount + 1
+                    if (fails >= 5) {
+                        cache.deletePending(file)
+                        activity(boardId, "pending_drop", "dropped ${op.type} after 5 failures", null, null, op.key)
+                    } else {
+                        cache.writePending(boardId, op.copy(failCount = fails))
+                    }
                 }
             }
         }

@@ -57,7 +57,7 @@ class LyreCache(
         }
     }
 
-    fun writePending(boardId: String, op: LyrePendingOp): File {
+    fun writePending(boardId: String, op: LyrePendingOp, snapshotJson: JSONObject? = null): File {
         val type = op.type
         require(type == "save_board" || type == "storage_put" || type == "publish") {
             "unsupported pending type"
@@ -69,7 +69,13 @@ class LyreCache(
             .put("seq", seq)
             .put("type", type)
             .put("createdAtMs", op.createdAtMs)
-        op.boardSnapshot?.let { json.put("boardSnapshot", it) }
+        val snapshotRel = if (snapshotJson != null) {
+            File(dir, "$seq.board.json").writeText(snapshotJson.toString())
+            "pending/$seq.board.json"
+        } else {
+            op.boardSnapshot
+        }
+        snapshotRel?.let { json.put("boardSnapshot", it) }
         op.key?.let { json.put("key", it) }
         op.localPath?.let { json.put("localPath", it) }
         json.put("failCount", op.failCount)
@@ -112,7 +118,7 @@ class LyreCache(
         val dir = File(boardDir(boardId), "pending")
         if (!dir.isDirectory) return emptyList()
         return dir.listFiles()
-            ?.filter { it.isFile && it.name.endsWith(".json") }
+            ?.filter { it.isFile && it.name.matches(PENDING_NAME) }
             ?.mapNotNull { f -> readPending(f)?.let { f to it } }
             ?.sortedBy { it.second.seq }
             .orEmpty()
@@ -139,7 +145,24 @@ class LyreCache(
     }
 
     fun deletePending(file: File) {
+        val seq = file.name.removeSuffix(".json")
+        file.parentFile?.let { File(it, "$seq.board.json").delete() }
         file.delete()
+    }
+
+    fun hasPendingSave(boardId: String): Boolean =
+        listPending(boardId).any { it.second.type == "save_board" }
+
+    fun readPendingSnapshot(boardId: String, op: LyrePendingOp): JSONObject? {
+        val rel = op.boardSnapshot ?: return null
+        if (rel == "board.json") return readBoardJson(boardId)
+        val f = File(boardDir(boardId), rel)
+        if (!f.isFile || f.length() <= 0L) return null
+        return try {
+            JSONObject(f.readText())
+        } catch (_: Exception) {
+            null
+        }
     }
 
     fun ensureOrig(boardId: String, objectKey: String): File? {
@@ -283,6 +306,7 @@ class LyreCache(
     companion object {
         private val UNSAFE = Regex("[^A-Za-z0-9._-]")
         private val EXT = Regex("[a-z0-9]{1,8}")
+        private val PENDING_NAME = Regex("""\d+\.json""")
         private val SUBDIRS = listOf("objects", "orig", "tmp", "movie-gens", "undo", "pending")
         const val DISK_BUDGET = 2L * 1024 * 1024 * 1024
         const val UNDO_CAP = 100

@@ -96,6 +96,14 @@ class LyreUndo(private val cache: LyreCache) {
         staging.dir.deleteRecursively()
     }
 
+    fun restoreLive(boardId: String, staging: UndoStaging) {
+        staging.files.forEach { swap ->
+            val saved = File(cache.boardDir(boardId), swap.savedRel)
+            if (!saved.isFile || saved.length() <= 0L) return@forEach
+            cache.copyReplace(saved, cache.objectFile(boardId, swap.liveRel))
+        }
+    }
+
     fun entries(boardId: String): List<UndoEntry> {
         return cache.undoDir(boardId).listFiles()
             ?.filter { it.isDirectory && File(it, "meta.json").isFile }

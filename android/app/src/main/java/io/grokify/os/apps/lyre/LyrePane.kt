@@ -81,9 +81,19 @@ fun LyrePane(
     BackHandler(onBack = { goBack() })
     LaunchedEffect(Unit) {
         onRequestPermissions()
-        if (busy != null && board != null) {
-            loading = false
-            return@LaunchedEffect
+        val boundId = session.boundBoardId.value
+        if (boundId != null) {
+            val localBoard = session.board.value
+                ?: withContext(Dispatchers.IO) {
+                    session.cache.readBoardJson(boundId)?.let { LyreBoardCodec.decode(it) }
+                }
+            if (localBoard != null) {
+                if (session.board.value == null) {
+                    session.bind(boundId, localBoard)
+                }
+                loading = false
+                return@LaunchedEffect
+            }
         }
         val result = withContext(Dispatchers.IO) {
             runCatching {
@@ -97,6 +107,13 @@ fun LyrePane(
                 val odysseus = projects.firstOrNull { it.isOdysseus || it.boardId == "lyre" }
                     ?: return@runCatching LoadResult(error = "not_found")
                 store.projectId = odysseus.id
+                val local = session.cache.readBoardJson(odysseus.boardId)
+                if (session.cache.hasPendingSave(odysseus.boardId) && local != null) {
+                    return@runCatching LoadResult(
+                        board = LyreBoardCodec.decode(local),
+                        boardId = odysseus.boardId,
+                    )
+                }
                 val boardJson = session.api.board(odysseus.boardId)
                 if (!boardJson.optBoolean("ok", false)) {
                     return@runCatching LoadResult(
@@ -110,7 +127,15 @@ fun LyrePane(
             }.getOrElse { LoadResult(error = it.message ?: "request_failed") }
         }
         if (result.board != null && result.boardId != null) {
-            session.bind(result.boardId, result.board)
+            val already = session.boundBoardId.value
+            if (already == result.boardId && session.cache.hasPendingSave(result.boardId)) {
+                val local = session.cache.readBoardJson(result.boardId)
+                if (local != null && session.board.value == null) {
+                    session.bind(result.boardId, LyreBoardCodec.decode(local))
+                }
+            } else if (already != result.boardId || session.board.value == null) {
+                session.bind(result.boardId, result.board)
+            }
         }
         error = result.error
         loading = false

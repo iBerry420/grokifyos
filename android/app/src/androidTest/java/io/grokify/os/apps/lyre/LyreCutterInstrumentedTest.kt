@@ -84,18 +84,31 @@ class LyreCutterInstrumentedTest {
         assertEquals(cut.durationSec, movie.durationSec, FRAME)
         assertEquals(cut.fps, movie.fps!!, 0.5)
         assertEquals(key(env, "movie.mp4"), movie.src)
+        assertTrue(
+            env.cache.listPending(env.boardId).any {
+                it.second.type == "storage_put" && it.second.key == key(env, "movie.mp4")
+            },
+        )
     }
 
     @Test
     fun burnAudioTwoBedsWithGapUs() = runBlocking {
         cutter = Media3LyreCutter(app) { File(app.cacheDir, "lyre-tmp").also { it.mkdirs() } }
+        var pictureFile = clip10
+        repeat(3) {
+            pictureFile = cutter.stitch(pictureFile, clip10, dropLast = false, keepSec = null).file
+        }
+        val picture = cutter.probe(pictureFile)
+        assertTrue(picture.durationSec > 1.5)
         val beds = listOf(
-            AudioBed(clip3, 0.0, 0.125),
+            AudioBed(clip3, 0.1, 0.125),
             AudioBed(clip3, 1.5, 0.125),
         )
-        val cut = cutter.burnAudio(clip10, beds)
+        val cut = cutter.burnAudio(pictureFile, beds)
+        val after = cutter.probe(cut.file)
         assertTrue(cut.file.length() > 0L)
-        assertTrue(cut.durationSec > 0.0)
+        assertTrue(after.hasAudio)
+        assertEquals(picture.durationSec, after.durationSec, FRAME)
     }
 
     @Test
@@ -121,6 +134,32 @@ class LyreCutterInstrumentedTest {
         assertTrue(env.session.movieGens().has(env.boardId, 1))
         assertFalse(env.session.movieGens().has(env.boardId, 2))
         assertNull(frame(env, "fr_c").videoGeneratingError)
+        assertTrue(
+            env.cache.listPending(env.boardId).any {
+                it.second.type == "storage_put" && it.second.key == key(env, "movie.mp4")
+            },
+        )
+    }
+
+    @Test
+    fun splitAttachesDistinctKeys() = runBlocking {
+        val env = env("split_keys")
+        seed(env, "clips/lc_a.mp4", clip10)
+        seed(env, "clips/lc_b.mp4", clip10)
+        val a = probeKey(env, "clips/lc_a.mp4")
+        val b = probeKey(env, "clips/lc_b.mp4")
+        env.session.bind(env.boardId, twoClipBoard(env.boardId, a.durationSec, b.durationSec, a.fps))
+        env.session.applyAwait(LyreRules.split(env.session.board.value!!, "lc_b", b.durationSec / 2.0))
+        val after = env.session.board.value!!
+        val left = after.videoLayers[0].clips.first { it.id == "lc_b" }
+        val right = after.videoLayers[0].clips.first { it.id != "lc_a" && it.id != "lc_b" }
+        assertNotEquals(left.src, right.src)
+        assertTrue(left.src.contains(".l"))
+        assertTrue(right.src.contains(".r"))
+        assertEquals(left.src, frameOf(after, left.linkedFrameId!!).videoSrc)
+        assertEquals(right.src, frameOf(after, right.linkedFrameId!!).videoSrc)
+        assertTrue(env.cache.objectFile(env.boardId, left.src).length() > 0L)
+        assertTrue(env.cache.objectFile(env.boardId, right.src).length() > 0L)
     }
 
     @Test

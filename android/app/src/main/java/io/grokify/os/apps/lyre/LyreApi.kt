@@ -51,7 +51,7 @@ class LyreApi(private val tokenProvider: () -> String?) {
         return streamClient.newCall(req).execute()
     }
 
-    /** POST raw body. Query action=storage_put&key= (URLEncoder). */
+    /** Raw POST on streamClient; key query-encoded. JSON metadata only on the response. Never gos_json_body / never PUT. */
     fun putStorage(key: String, file: File): JSONObject {
         val encoded = URLEncoder.encode(key, "UTF-8")
         val mime = mimeFor(file)
