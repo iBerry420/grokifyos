@@ -226,6 +226,8 @@ data class CutPlan(
     val beds: List<AudioBed> = emptyList(),
 )
 
+data class RuleResult(val board: BoardData, val plan: CutPlan?)
+
 fun lyreProjectFromJson(obj: JSONObject): LyreProject {
     return LyreProject(
         id = obj.optString("id"),

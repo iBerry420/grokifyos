@@ -1,0 +1,39 @@
+{
+  "title": "Odysseus",
+  "brainstorm": "",
+  "scenes": [{
+    "id": "sc_1", "title": "Scene 1", "book": "", "durationTargetSec": 0,
+    "logline": "", "dialogue": "", "notes": "",
+    "frames": [
+      {"id": "fr_a", "src": "boards/lyre/frames/fr_a.jpg", "caption": "A", "durationSec": 4,
+       "videoSrc": "boards/lyre/clips/lc_a.mp4", "videoDurationSec": 4, "videoFps": 24},
+      {"id": "fr_hold", "src": "boards/lyre/frames/fr_hold.jpg", "caption": "Hold", "durationSec": 2},
+      {"id": "fr_b", "src": "boards/lyre/frames/fr_b.jpg", "caption": "B", "durationSec": 3,
+       "videoSrc": "boards/lyre/clips/lc_b.mp4", "videoDurationSec": 3, "videoFps": 24}
+    ]
+  }],
+  "activeSceneId": "sc_1",
+  "refFolders": [{"id": "lib", "name": "Library", "images": []}],
+  "activeFolderId": "lib",
+  "videoLayers": [{
+    "id": "ly_v", "kind": "video", "name": "V",
+    "clips": [
+      {"id": "lc_a", "src": "boards/lyre/clips/lc_a.mp4", "name": "A", "startSec": 0,
+       "durationSec": 4, "sourceDurationSec": 4, "linkedFrameId": "fr_a"},
+      {"id": "lc_b", "src": "boards/lyre/clips/lc_b.mp4", "name": "B", "startSec": 6,
+       "durationSec": 3, "sourceDurationSec": 3, "linkedFrameId": "fr_b"}
+    ]
+  }],
+  "audioLayers": [],
+  "libraryAudio": [],
+  "libraryVideo": [],
+  "movie": {
+    "src": "boards/lyre/movie.mp4",
+    "durationSec": 6.958,
+    "fps": 24,
+    "parts": [
+      {"clipId": "lc_a", "src": "boards/lyre/clips/lc_a.mp4", "durationSec": 4},
+      {"clipId": "lc_b", "src": "boards/lyre/clips/lc_b.mp4", "durationSec": 3}
+    ]
+  }
+}

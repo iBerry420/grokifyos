@@ -115,6 +115,7 @@ fun LyreEditor(
     var stills by remember { mutableStateOf<Map<String, File>>(emptyMap()) }
     var program by remember { mutableStateOf<List<LyrePlayItem>>(emptyList()) }
     var onHold by remember { mutableStateOf(false) }
+    var clipSheet by remember { mutableStateOf<ClipSheetTarget?>(null) }
 
     fun persistPlayhead() {
         store.playhead = playhead
@@ -304,7 +305,16 @@ fun LyreEditor(
             clips = storyboard,
             stills = stills,
             currentId = current?.frame?.id,
-            onSelect = { seekTo(it.start, resume = false) },
+            onSelect = { sc ->
+                seekTo(sc.start, resume = false)
+                if (!LyreMovie.frameInMovie(board.movie, board.videoLayers, sc.frame.id)) {
+                    clipSheet = ClipSheetTarget(
+                        frame = sc.frame,
+                        clip = linkedClip(board, sc.frame.id),
+                        preferClip = sc.frame.videoSrc.isNullOrEmpty(),
+                    )
+                }
+            },
         )
 
         LyreVideoRail(
@@ -318,7 +328,10 @@ fun LyreEditor(
             },
             onSelectLeftover = { clip ->
                 val sc = clip.linkedFrameId?.let { LyreClip.clipOf(board.scenes, it) }
-                if (sc != null) seekTo(sc.start, resume = false)
+                if (sc != null) {
+                    seekTo(sc.start, resume = false)
+                    clipSheet = ClipSheetTarget(frame = sc.frame, clip = clip, preferClip = true)
+                }
             },
         )
 
@@ -384,6 +397,29 @@ fun LyreEditor(
             },
         )
     }
+
+    val sheet = clipSheet
+    if (sheet != null) {
+        LyreClipSheet(
+            board = board,
+            frame = sheet.frame,
+            clip = sheet.clip,
+            preferClip = sheet.preferClip,
+            onDismiss = { clipSheet = null },
+        )
+    }
+}
+
+private data class ClipSheetTarget(
+    val frame: Frame,
+    val clip: LayerClip?,
+    val preferClip: Boolean,
+)
+
+private fun linkedClip(board: BoardData, frameId: String): LayerClip? {
+    return board.videoLayers.asSequence()
+        .flatMap { it.clips.asSequence() }
+        .firstOrNull { it.linkedFrameId == frameId }
 }
 
 private fun applyClock(
