@@ -435,6 +435,82 @@ class LyreRulesTest {
     }
 
     @Test
+    fun scenesLibraryBinRulesAndDualWrite() {
+        val unstitched = fixture("unstitched")
+        val added = LyreRules.addScene(unstitched)
+        assertEquals(2, added.board.scenes.size)
+        assertEquals(added.board.scenes.last().id, added.board.activeSceneId)
+        assertTrue(added.board.scenes.last().frames.isEmpty())
+
+        val renamed = LyreRules.renameScene(added.board, "sc_1", "Prologue")
+        assertEquals("Prologue", renamed.board.scenes[0].title)
+        assertSame(added.board, LyreRules.renameScene(added.board, "sc_1", "  ").board)
+
+        val lastId = renamed.board.scenes.last().id
+        val moved = LyreRules.moveScene(renamed.board, lastId, 0)
+        assertEquals(lastId, moved.board.scenes[0].id)
+        assertEquals("sc_1", moved.board.scenes[1].id)
+        assertSame(moved.board, LyreRules.moveScene(moved.board, lastId, 0).board)
+
+        val still = RefImage(id = "rf_lib", src = "boards/lyre/frames/lib.jpg", caption = "LibStill")
+        val prefixStill = LyreRules.insertLibraryStill(unstitched, still, "fr_a")
+        assertSame(unstitched, prefixStill.board)
+        val dumpedStill = still.copy(fromFrameId = "fr_x", fromSceneId = "sc_1")
+        assertSame(unstitched, LyreRules.insertLibraryStill(unstitched, dumpedStill, "fr_b").board)
+        val insertedStill = LyreRules.insertLibraryStill(unstitched, still, "fr_b")
+        assertEquals("LibStill", insertedStill.board.scenes[0].frames.last().caption)
+        assertFalse(
+            LyreMovie.frameInMovie(
+                insertedStill.board.movie,
+                insertedStill.board.videoLayers,
+                insertedStill.board.scenes[0].frames.last().id,
+            ),
+        )
+
+        val item = LibraryVideo(id = "lv_1", src = "boards/lyre/clips/lib.mp4", name = "Lib", durationSec = 5.0)
+        val prefixVideo = LyreRules.insertLibraryVideo(unstitched, item, "fr_a")
+        assertSame(unstitched, prefixVideo.board)
+        val insertedVideo = LyreRules.insertLibraryVideo(unstitched, item, "fr_b")
+        val videoFrame = insertedVideo.board.scenes[0].frames.last()
+        val videoClip = insertedVideo.board.videoLayers.flatMap { it.clips }
+            .first { it.linkedFrameId == videoFrame.id }
+        assertEquals(videoFrame.videoSrc, videoClip.src)
+        assertEquals(item.src, videoFrame.videoSrc)
+        assertDualWrite(insertedVideo.board)
+
+        val zeroVideo = LibraryVideo(id = "lv_0", src = "boards/lyre/clips/zero.mp4", name = "Zero", durationSec = 0.0)
+        val zeroInserted = LyreRules.insertLibraryVideo(unstitched, zeroVideo, "fr_b")
+        assertEquals(0.1, zeroInserted.board.scenes[0].frames.last().durationSec, 0.0)
+
+        val dumped = LyreRules.dumpScene(unstitched, "sc_1")
+        assertEquals(1, dumped.board.scenes.size)
+        assertTrue(dumped.board.scenes[0].frames.isEmpty())
+        assertTrue(dumped.board.videoLayers.flatMap { it.clips }.isEmpty())
+        val bin = dumped.board.refFolders.flatMap { it.images }
+        assertTrue(bin.any { it.fromFrameId == "fr_b" && it.fromSceneId == "sc_1" })
+        val dumpedBeat = bin.first { it.id == "fr_b" }
+        assertEquals("boards/lyre/clips/lc_b.mp4", dumpedBeat.videoSrc)
+
+        val recycled = LyreRules.recycle(dumped.board, dumpedBeat.id)
+        val restored = recycled.board.scenes.flatMap { it.frames }.first { it.id == "fr_b" }
+        val restoredClip = recycled.board.videoLayers.flatMap { it.clips }
+            .first { it.linkedFrameId == restored.id }
+        assertEquals(restored.videoSrc, restoredClip.src)
+        assertEquals(dumpedBeat.videoSrc, restored.videoSrc)
+        assertFalse(LyreMovie.frameInMovie(recycled.board.movie, recycled.board.videoLayers, restored.id))
+        assertDualWrite(recycled.board)
+        assertTrue(recycled.board.refFolders.flatMap { it.images }.none { it.id == dumpedBeat.id })
+
+        val withLib = unstitched.copy(
+            refFolders = listOf(RefFolder(id = "lib", name = "Library", images = listOf(still))),
+        )
+        val deleted = LyreRules.deleteRefImage(withLib, still.id)
+        assertTrue(deleted.board.refFolders.all { folder -> folder.images.none { it.id == still.id } })
+        assertSame(withLib, LyreRules.deleteRefImage(withLib, "missing").board)
+        assertSame(dumped.board, LyreRules.recycle(dumped.board, still.id).board)
+    }
+
+    @Test
     fun leftoverMutationsKeepAudioLayersInSync() {
         val three = fixture("unstitched_3")
         val extracted = LyreRules.extractAudio(three, "lc_c")

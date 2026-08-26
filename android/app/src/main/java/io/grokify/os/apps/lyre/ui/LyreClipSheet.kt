@@ -270,7 +270,19 @@ fun LyreClipSheet(
                             })
                         }
                     }
-                    // Audio/Files/Library is the PR 7 insert surface; leftover mic/camera capture is PR 8.
+                    if (leftoverFrame) {
+                        SheetChip("Camera", selected = false, enabled = canImagine, onClick = {
+                            runCatching { takePicture.launch(captureUri) }
+                        })
+                        SheetChip("Gallery", selected = false, enabled = canImagine, onClick = {
+                            pickGallery.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
+                            )
+                        })
+                        SheetChip("Files", selected = false, enabled = canImagine, onClick = {
+                            pickFiles.launch("*/*")
+                        })
+                    }
                     if (leftoverFrame && onPickAudio != null) {
                         SheetChip("Audio", selected = false, enabled = canMutate, onClick = {
                             onPickAudio()

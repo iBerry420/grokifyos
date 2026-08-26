@@ -73,13 +73,16 @@ import io.grokify.os.apps.lyre.LyreRules
 import io.grokify.os.apps.lyre.LyreProject
 import io.grokify.os.apps.lyre.LyreApi
 import io.grokify.os.apps.lyre.LibraryAudio
+import io.grokify.os.apps.lyre.LyreActivityLine
 import io.grokify.os.apps.lyre.LyreCache
 import io.grokify.os.apps.lyre.LyreClip
 import io.grokify.os.apps.lyre.LyreClockTarget
 import io.grokify.os.apps.lyre.LyreMovie
+import io.grokify.os.apps.lyre.LyreMuseMessage
 import io.grokify.os.apps.lyre.LyrePlayItem
 import io.grokify.os.apps.lyre.LyrePlayer
 import io.grokify.os.apps.lyre.LyreStore
+import io.grokify.os.apps.lyre.LyreUndo
 import io.grokify.os.apps.lyre.RuleResult
 import io.grokify.os.apps.lyre.StoryboardClip
 import io.grokify.os.apps.lyre.lyreClockTarget
@@ -137,6 +140,9 @@ fun LyreEditor(
     watchApi: LyreApi? = null,
     onPublish: (Boolean) -> Unit = {},
     onInsertAudioUri: (String, Uri, String) -> Unit = { _, _, _ -> },
+    museMessages: List<LyreMuseMessage> = emptyList(),
+    museBusy: Boolean = false,
+    onAskMuse: (String, Double) -> Unit = { _, _ -> },
 ) {
     val context = LocalContext.current
     val player = remember { LyrePlayer(context.applicationContext) }
@@ -181,6 +187,8 @@ fun LyreEditor(
     }
 
     val stopPlaybackLatest = rememberUpdatedState { stopPlayback() }
+    val askMuseLatest = rememberUpdatedState(onAskMuse)
+    val onApplyLatest = rememberUpdatedState(onApply)
 
     DisposableEffect(player, lifecycleOwner) {
         val listener = object : Player.Listener {
@@ -250,6 +258,7 @@ fun LyreEditor(
     }
 
     val current = LyreClip.clipAtTime(storyboard, playhead.toDouble())
+    val leftoverAfterId = current?.frame?.id?.takeIf { LyreRules.leftoverFrame(board, it) != null }
     val showStill = onHold || program.isEmpty() || when (val target = lyreClockTarget(board, playhead.toDouble())) {
         is LyreClockTarget.Movie -> program.none { it.id == "lc_movie" }
         is LyreClockTarget.Leftover -> program.none { it.id == target.clipId }
@@ -278,6 +287,30 @@ fun LyreEditor(
             stopPlayback()
         } else {
             seekTo(playhead.toDouble(), resume = true)
+        }
+    }
+
+    fun jumpToActivity(line: LyreActivityLine) {
+        val oldest = LyreUndo(cache).entries(boardId).minOfOrNull { it.atMs }
+        if (oldest != null && line.ts < oldest) return
+        val linked = line.clipId?.let { id ->
+            board.videoLayers.asSequence().flatMap { it.clips.asSequence() }.firstOrNull { it.id == id }
+        }
+        val sc = line.frameId?.let { LyreClip.clipOf(board.scenes, it) }
+            ?: linked?.linkedFrameId?.let { LyreClip.clipOf(board.scenes, it) }
+        if (sc != null) {
+            seekTo(sc.start, resume = false)
+            if (LyreRules.leftoverFrame(board, sc.frame.id) != null) {
+                clipSheet = ClipSheetTarget(
+                    frame = sc.frame,
+                    clip = linkedClip(board, sc.frame.id) ?: linked,
+                    preferClip = true,
+                )
+            }
+            return
+        }
+        if (linked != null) {
+            seekTo(linked.startSec, resume = false)
         }
     }
 
@@ -332,14 +365,6 @@ fun LyreEditor(
                     fontSize = 14.sp,
                 )
             }
-        }
-        if (museOpen) {
-            Text(
-                "Muse sheet in a later build",
-                color = GrokifyColors.TextMuted,
-                fontSize = 11.sp,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
-            )
         }
 
         LyrePlayerStage(
@@ -405,11 +430,38 @@ fun LyreEditor(
                 .weight(1f)
                 .fillMaxWidth(),
         ) {
-            when (chip) {
-                "library" -> LyreLibraryPane(board)
-                "bin" -> LyreBinPane(board)
-                "activity" -> LyreActivityPane()
-                else -> LyreScenesPane(board)
+            if (museOpen) {
+                LyreMuseSheet(
+                    messages = museMessages,
+                    busy = museBusy,
+                    onSend = { text -> askMuseLatest.value(text, playhead.toDouble()) },
+                )
+            } else {
+                val canEdit = !busy && !imagineBusy
+                when (chip) {
+                    "library" -> LyreLibraryPane(
+                        board = board,
+                        afterFrameId = leftoverAfterId,
+                        enabled = canEdit,
+                        onApply = { onApplyLatest.value(it) },
+                    )
+                    "bin" -> LyreBinPane(
+                        board = board,
+                        enabled = canEdit,
+                        onApply = { onApplyLatest.value(it) },
+                    )
+                    "activity" -> LyreActivityPane(
+                        cache = cache,
+                        boardId = boardId,
+                        board = board,
+                        onJump = { jumpToActivity(it) },
+                    )
+                    else -> LyreScenesPane(
+                        board = board,
+                        enabled = canEdit,
+                        onApply = { onApplyLatest.value(it) },
+                    )
+                }
             }
         }
 

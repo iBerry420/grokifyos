@@ -61,6 +61,8 @@ fun LyrePane(
     val project by session.project.collectAsState()
     val watchBusy by session.watchBusy.collectAsState()
     val watchError by session.watchError.collectAsState()
+    val museMessages by session.museMessages.collectAsState()
+    val museBusy by session.museBusy.collectAsState()
 
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -209,6 +211,9 @@ fun LyrePane(
                 watchApi = session.api,
                 onPublish = { session.publish(it) },
                 onInsertAudioUri = { frameId, uri, name -> session.insertAudioUri(frameId, uri, name) },
+                museMessages = museMessages,
+                museBusy = museBusy,
+                onAskMuse = { text, playheadSec -> session.askMuse(text, playheadSec) },
             )
         }
         else -> {

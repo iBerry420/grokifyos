@@ -9,6 +9,7 @@ import io.grokify.os.data.ApiKeyIds
 import io.grokify.os.data.TokenStore
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -22,6 +23,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.json.JSONArray
 import org.json.JSONObject
 
 data class LyreJob(
@@ -40,10 +42,12 @@ class LyreSession(
     imagineOverride: LyreImagineClient? = null,
 ) {
     private val appCtx = app.applicationContext
+    private val store = LyreStore(app)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
     private val flushMutex = Mutex()
     private val boardEpoch = AtomicInteger(0)
+    private val museLock = AtomicBoolean(false)
     private val cutter: LyreCutter = cutterOverride ?: Media3LyreCutter(appCtx) {
         File(cache.boardDir(requireBoardId()), "tmp")
     }
@@ -77,6 +81,12 @@ class LyreSession(
     private val _watchError = MutableStateFlow<String?>(null)
     val watchError: StateFlow<String?> = _watchError
 
+    private val _museMessages = MutableStateFlow<List<LyreMuseMessage>>(emptyList())
+    val museMessages: StateFlow<List<LyreMuseMessage>> = _museMessages
+
+    private val _museBusy = MutableStateFlow(false)
+    val museBusy: StateFlow<Boolean> = _museBusy
+
     @Volatile
     private var running: Job? = null
 
@@ -91,6 +101,7 @@ class LyreSession(
         _boardId.value = boardId
         _board.value = board
         cache.writeBoardJson(boardId, LyreBoardCodec.encode(board))
+        seedMuse(boardId, board)
         scope.launch { flushPending(boardId) }
     }
 
@@ -127,6 +138,39 @@ class LyreSession(
         val epoch = boardEpoch.get()
         running = scope.launch {
             mutex.withLock { insertAudioLocked(frameId, srcFile, name, epoch) }
+        }
+    }
+
+    fun askMuse(userText: String, playheadSec: Double) {
+        val prompt = userText.trim()
+        if (prompt.isEmpty()) return
+        if (!museLock.compareAndSet(false, true)) return
+        _museBusy.value = true
+        scope.launch {
+            val id = _boardId.value
+            try {
+                if (id == null) return@launch
+                appendMuse(id, LyreMuseMessage("user", prompt))
+                val board = _board.value ?: return@launch
+                val projectName = _project.value?.name?.ifBlank { board.title } ?: board.title
+                val digest = LyreMuse.digest(
+                    board,
+                    projectName,
+                    playheadSec,
+                    LyreActivity.last(cache, id, 8),
+                )
+                val raw = LyreMuse.complete(appCtx, prompt, digest)
+                val (ok, text) = LyreMuse.parseReply(raw)
+                appendMuse(id, LyreMuseMessage(if (ok) "muse" else "error", text))
+                persistWebMuse(id)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                id?.let { appendMuse(it, LyreMuseMessage("error", e.message ?: "muse_failed")) }
+            } finally {
+                _museBusy.value = false
+                museLock.set(false)
+            }
         }
     }
 
@@ -1027,6 +1071,42 @@ class LyreSession(
                     }
                 }
             }
+        }
+    }
+
+    private fun seedMuse(boardId: String, board: BoardData) {
+        var local = store.museMessages(boardId)
+        if (local.isEmpty()) {
+            val fromUi = LyreMuse.parseUiMessages(board.ui)
+            if (fromUi.isNotEmpty()) {
+                store.setMuseMessages(boardId, fromUi)
+                local = store.museMessages(boardId)
+            }
+        }
+        _museMessages.value = local
+    }
+
+    private fun appendMuse(boardId: String, msg: LyreMuseMessage) {
+        val next = (_museMessages.value + msg).let { list ->
+            if (list.size <= LyreMuse.TRANSCRIPT_CAP) list else list.takeLast(LyreMuse.TRANSCRIPT_CAP)
+        }
+        _museMessages.value = next
+        store.setMuseMessages(boardId, next)
+    }
+
+    private suspend fun persistWebMuse(boardId: String) {
+        mutex.withLock {
+            val board = _board.value ?: return@withLock
+            if (_boardId.value != boardId) return@withLock
+            val ui = board.ui ?: return@withLock
+            if (!ui.has("museMessages")) return@withLock
+            val arr = JSONArray()
+            _museMessages.value.forEach { msg ->
+                val role = if (msg.role == "user") "user" else "muse"
+                arr.put(JSONObject().put("role", role).put("text", msg.text))
+            }
+            val nextUi = JSONObject(ui.toString()).put("museMessages", arr)
+            commit(boardId, board.copy(ui = nextUi))
         }
     }
 
