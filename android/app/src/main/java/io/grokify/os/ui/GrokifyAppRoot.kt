@@ -334,7 +334,6 @@ fun GrokifyAppRoot(
     val imeBottom = WindowInsets.ime.getBottom(density)
     val keyboardOpen = imeBottom > 0
 
-    // System back: overlays, then previous pane, then Chat double-press to background.
     BackHandler {
         when {
             state.showSettings -> onCloseSettings()

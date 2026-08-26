@@ -22,6 +22,8 @@
     <string name="notification_channel_spotify_dj_desc">Native Live AI DJ: library queue and banter between tracks</string>
     <string name="notification_channel_spacexai_usage">SpaceXAI usage alerts</string>
     <string name="notification_channel_spacexai_usage_desc">Alerts when prepaid balance or period spend crosses your thresholds</string>
+    <string name="notification_channel_gbot">Grok Bot</string>
+    <string name="notification_channel_gbot_desc">Alerts when a Grok Bot automation is running, finishes, or needs your approval</string>
     <string name="fg_title">GrokifyOS</string>
     <string name="fg_text">Background bridge (can be ignored)</string>
     <string name="notification_listener_label">GrokifyOS notification access</string>

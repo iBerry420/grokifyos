@@ -5,13 +5,17 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
+import coil.ImageLoader
+import coil.ImageLoaderFactory
+import coil.decode.GifDecoder
+import coil.decode.ImageDecoderDecoder
 import io.grokify.os.data.TokenStore
 import io.grokify.os.wearbridge.WearApiKeySync
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 
-class GrokifyApp : Application() {
+class GrokifyApp : Application(), ImageLoaderFactory {
     lateinit var tokenStore: TokenStore
         private set
 
@@ -146,6 +150,16 @@ class GrokifyApp : Application() {
                 description = getString(R.string.notification_channel_spacexai_usage_desc)
             }
         )
+        nm.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_GBOT,
+                getString(R.string.notification_channel_gbot),
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = getString(R.string.notification_channel_gbot_desc)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            }
+        )
         // Re-arm lockscreen Spotify controller after process start
         runCatching {
             if (io.grokify.os.apps.SpotifyControllerStore(this).enabled) {
@@ -160,6 +174,20 @@ class GrokifyApp : Application() {
                 io.grokify.os.apps.scheduleUsageAlertChecks(this)
             }
         }
+        runCatching { io.grokify.os.apps.gbot.GbotWatch.sync(this) }
+    }
+
+    override fun newImageLoader(): ImageLoader {
+        return ImageLoader.Builder(this)
+            .components {
+                if (Build.VERSION.SDK_INT >= 28) {
+                    add(ImageDecoderDecoder.Factory())
+                } else {
+                    add(GifDecoder.Factory())
+                }
+            }
+            .crossfade(true)
+            .build()
     }
 
     companion object {
@@ -174,6 +202,7 @@ class GrokifyApp : Application() {
         const val CHANNEL_SPOTIFY_CTRL = "grokify_spotify_ctrl_v11"
         const val CHANNEL_SPOTIFY_DJ = "grokify_spotify_dj"
         const val CHANNEL_SPACEXAI_USAGE = "grokify_spacexai_usage"
+        const val CHANNEL_GBOT = "grokify_gbot"
 
         lateinit var instance: GrokifyApp
             private set

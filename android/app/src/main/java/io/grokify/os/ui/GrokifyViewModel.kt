@@ -83,6 +83,12 @@ data class SessionItem(
     val title: String,
     val updatedAt: String,
     val messageCount: Int = 0,
+    val inputTokens: Long = 0L,
+    val outputTokens: Long = 0L,
+    val lastContextTokens: Long = 0L,
+    val wallTimeS: Long = 0L,
+    val toolCalls: Int = 0,
+    val tokensEstimated: Boolean = false,
 )
 
 data class NoteItem(
@@ -110,6 +116,37 @@ data class UsageProduct(
     val usagePercent: Double? = null,
 )
 
+data class UsageDayPoint(
+    val day: String,
+    val agentSessions: Long = 0L,
+    val modelLoops: Long = 0L,
+    val toolCalls: Long = 0L,
+    val wallTimeS: Long = 0L,
+    val modelTimeS: Long = 0L,
+    val lastContextTokens: Long = 0L,
+    val estimatedInputTokens: Long = 0L,
+    val estimatedOutputTokens: Long = 0L,
+    val messageCount: Long = 0L,
+)
+
+data class UsageTrackerInfo(
+    val ok: Boolean = true,
+    val agentSessions: Long = 0L,
+    val modelLoops: Long = 0L,
+    val toolCalls: Long = 0L,
+    val wallTimeS: Long = 0L,
+    val modelTimeS: Long = 0L,
+    val lastContextTokens: Long = 0L,
+    val estimatedInputTokens: Long = 0L,
+    val estimatedOutputTokens: Long = 0L,
+    val reasoningTokens: Long = 0L,
+    val messageCount: Long = 0L,
+    val tools: List<String> = emptyList(),
+    val daily: List<UsageDayPoint> = emptyList(),
+    val timezone: String = "",
+    val fetchedAt: String = "",
+)
+
 /** SuperGrok / Grok Build weekly usage pool (CLI `/usage`). */
 data class UsageInfo(
     val usagePercent: Double = 0.0,
@@ -130,6 +167,7 @@ data class UsageInfo(
     val loginUrl: String? = null,
     val loginUserCode: String? = null,
     val loginMessage: String? = null,
+    val tracker: UsageTrackerInfo? = null,
 )
 
 enum class ChatPanel { None, History, Notes }
@@ -968,12 +1006,7 @@ class GrokifyViewModel(app: Application) : AndroidViewModel(app) {
                 if (id.equals(sid, true)) found = title
                 // Keep Live DJ / plugin sessions out of the Chat history panel.
                 if (isInternalAppSessionTitle(title)) continue
-                list += SessionItem(
-                    id = id,
-                    title = title,
-                    updatedAt = o.optString("updated_at"),
-                    messageCount = o.optInt("message_count", 0),
-                )
+                list += o.toSessionItem(id, title)
             }
             _state.update { it.copy(sessions = list) }
             found
@@ -1006,12 +1039,7 @@ class GrokifyViewModel(app: Application) : AndroidViewModel(app) {
                         val title = o.optString("title").ifBlank { "Chat" }
                         // Plugin / Spotify Live DJ bridge sessions stay inside those apps.
                         if (isInternalAppSessionTitle(title)) continue
-                        list += SessionItem(
-                            id = sid,
-                            title = title,
-                            updatedAt = o.optString("updated_at"),
-                            messageCount = o.optInt("message_count", 0),
-                        )
+                        list += o.toSessionItem(sid, title)
                     }
                 }
                 _state.update { it.copy(sessions = list, loadingPanel = false) }
@@ -1232,6 +1260,7 @@ class GrokifyViewModel(app: Application) : AndroidViewModel(app) {
                     val err = data.optString("error", "usage_failed").ifBlank { "usage_failed" }
                     val msg = data.optString("message").ifBlank { err }
                     val loginFields = parseLoginFields(data)
+                    val tracker = parseUsageTracker(data.optJSONObject("tracker"))
                     _state.update {
                         val prev = it.usage
                         it.copy(
@@ -1250,6 +1279,7 @@ class GrokifyViewModel(app: Application) : AndroidViewModel(app) {
                                 loginUrl = loginFields.loginUrl,
                                 loginUserCode = loginFields.loginUserCode,
                                 loginMessage = loginFields.loginMessage,
+                                tracker = tracker ?: prev?.tracker,
                             ),
                         )
                     }
@@ -1277,7 +1307,8 @@ class GrokifyViewModel(app: Application) : AndroidViewModel(app) {
                 val pct = data.optDouble("usage_percent", 0.0)
                 val resetAt = data.optString("reset_at")
                 val tier = data.optString("subscription_tier")
-                val label = formatUsageLabel(pct, resetAt)
+                val tracker = parseUsageTracker(data.optJSONObject("tracker"))
+                val label = formatUsageLabel(pct, resetAt, tracker)
                 stopLoginPoll()
                 _state.update {
                     it.copy(
@@ -1298,6 +1329,7 @@ class GrokifyViewModel(app: Application) : AndroidViewModel(app) {
                             loginUrl = null,
                             loginUserCode = null,
                             loginMessage = null,
+                            tracker = tracker,
                         ),
                     )
                 }
@@ -1485,10 +1517,82 @@ class GrokifyViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun formatUsageLabel(percent: Double, resetAt: String): String {
-        // Compact chip label — product breakdown lives in Settings, not the status line.
-        return "${formatPct(percent)} used · ${formatResetRelative(resetAt)}"
+    private fun formatUsageLabel(
+        percent: Double,
+        resetAt: String,
+        tracker: UsageTrackerInfo? = null,
+    ): String {
+        val parts = mutableListOf("${formatPct(percent)} used")
+        val wall = tracker?.wallTimeS ?: 0L
+        if (wall > 0L) parts += UsageFormat.compactDuration(wall)
+        val input = tracker?.estimatedInputTokens ?: 0L
+        if (input > 0L) parts += "${UsageFormat.compactTokens(input)} in"
+        parts += formatResetRelative(resetAt)
+        return parts.joinToString(" · ")
     }
+
+    private fun parseUsageTracker(obj: org.json.JSONObject?): UsageTrackerInfo? {
+        if (obj == null || !obj.optBoolean("ok", false)) return null
+        val totals = obj.optJSONObject("totals") ?: obj
+        val tools = mutableListOf<String>()
+        val toolsArr = totals.optJSONArray("tools")
+        if (toolsArr != null) {
+            for (i in 0 until toolsArr.length()) {
+                val t = toolsArr.optString(i)
+                if (t.isNotBlank()) tools += t
+            }
+        }
+        val daily = mutableListOf<UsageDayPoint>()
+        val dailyArr = obj.optJSONArray("daily")
+        if (dailyArr != null) {
+            for (i in 0 until dailyArr.length()) {
+                val d = dailyArr.optJSONObject(i) ?: continue
+                daily += UsageDayPoint(
+                    day = d.optString("day"),
+                    agentSessions = d.optLong("agent_sessions", 0L),
+                    modelLoops = d.optLong("model_loops", 0L),
+                    toolCalls = d.optLong("tool_calls", 0L),
+                    wallTimeS = d.optLong("wall_time_s", 0L),
+                    modelTimeS = d.optLong("model_time_s", 0L),
+                    lastContextTokens = d.optLong("last_context_tokens", 0L),
+                    estimatedInputTokens = d.optLong("estimated_input_tokens", 0L),
+                    estimatedOutputTokens = d.optLong("estimated_output_tokens", 0L),
+                    messageCount = d.optLong("message_count", 0L),
+                )
+            }
+        }
+        return UsageTrackerInfo(
+            ok = true,
+            agentSessions = totals.optLong("agent_sessions", 0L),
+            modelLoops = totals.optLong("model_loops", 0L),
+            toolCalls = totals.optLong("tool_calls", 0L),
+            wallTimeS = totals.optLong("wall_time_s", 0L),
+            modelTimeS = totals.optLong("model_time_s", 0L),
+            lastContextTokens = totals.optLong("last_context_tokens", 0L),
+            estimatedInputTokens = totals.optLong("estimated_input_tokens", 0L),
+            estimatedOutputTokens = totals.optLong("estimated_output_tokens", 0L),
+            reasoningTokens = totals.optLong("reasoning_tokens", 0L),
+            messageCount = totals.optLong("message_count", 0L),
+            tools = tools,
+            daily = daily,
+            timezone = obj.optString("timezone"),
+            fetchedAt = obj.optString("fetched_at"),
+        )
+    }
+
+    private fun JSONObject.toSessionItem(id: String, title: String): SessionItem =
+        SessionItem(
+            id = id,
+            title = title,
+            updatedAt = optString("updated_at"),
+            messageCount = optInt("message_count", 0),
+            inputTokens = optLong("input_tokens", 0L),
+            outputTokens = optLong("output_tokens", 0L),
+            lastContextTokens = optLong("last_context_tokens", 0L),
+            wallTimeS = optLong("wall_time_s", 0L),
+            toolCalls = optInt("tool_calls", 0),
+            tokensEstimated = optBoolean("tokens_estimated", false),
+        )
 
     private fun formatPct(percent: Double): String =
         if (percent == percent.toLong().toDouble()) {
