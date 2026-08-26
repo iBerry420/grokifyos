@@ -420,10 +420,49 @@ object LyreRules {
         val frame: Frame,
     )
 
+    fun insertAudio(
+        board: BoardData,
+        frameId: String,
+        src: String,
+        name: String,
+        durationSec: Double,
+    ): RuleResult {
+        if (src.isEmpty()) return RuleResult(board, null)
+        if (findFrame(board, frameId) == null) return RuleResult(board, null)
+        if (LyreMovie.frameInMovie(board.movie, board.videoLayers, frameId)) {
+            return RuleResult(board, null)
+        }
+        val linked = board.videoLayers.asSequence()
+            .flatMap { it.clips.asSequence() }
+            .firstOrNull { it.linkedFrameId == frameId }
+        val startSec = linked?.startSec ?: LyreClip.clipOf(board.scenes, frameId)?.start ?: 0.0
+        val audioClip = LayerClip(
+            id = newId("lc_"),
+            src = src,
+            name = name.ifBlank { "Audio" },
+            startSec = startSec,
+            durationSec = durationSec,
+            sourceDurationSec = durationSec,
+            linkedFrameId = frameId,
+        )
+        return RuleResult(appendAudioClip(board, audioClip), null)
+    }
+
     internal fun leftoverFrame(board: BoardData, frameId: String): Frame? {
         val frame = findFrame(board, frameId) ?: return null
         if (LyreMovie.frameInMovie(board.movie, board.videoLayers, frame.id)) return null
         return frame
+    }
+
+    private fun appendAudioClip(board: BoardData, audioClip: LayerClip): BoardData {
+        val layers = board.audioLayers.toMutableList()
+        if (layers.isEmpty()) {
+            layers.add(MediaLayer(id = newId("ly_"), kind = "audio", name = "Audio", clips = listOf(audioClip)))
+        } else {
+            val last = layers.last()
+            layers[layers.lastIndex] = last.copy(clips = last.clips + audioClip)
+        }
+        return board.copy(audioLayers = layers)
     }
 
     private fun leftoverVideoClip(board: BoardData, clipId: String): LayerClip? {

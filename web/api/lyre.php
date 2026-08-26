@@ -1272,6 +1272,97 @@ function gos_lyre_imagine_status(array $access, string $requestId): never
     gos_api_json($out);
 }
 
+function gos_lyre_post_publish(array $access, array $body): never
+{
+    $userId = gos_lyre_user_id($access);
+    $mysql = gos_lyre_mysql();
+    $row = gos_lyre_lookup_project($mysql, $userId, $body);
+    if ($row === null) {
+        gos_api_json(['ok' => false, 'error' => 'not_found'], 404);
+    }
+    $visibility = strtolower(trim((string) ($body['visibility'] ?? '')));
+    if ($visibility !== 'public' && $visibility !== 'private') {
+        gos_api_json(['ok' => false, 'error' => 'visibility_required'], 400);
+    }
+    $boardId = (string) $row['board_id'];
+    $projectId = (string) $row['id'];
+    $token = isset($row['watch_token']) && is_string($row['watch_token']) && preg_match('/^[a-f0-9]{32}$/', $row['watch_token']) === 1
+        ? $row['watch_token']
+        : null;
+    if ($visibility === 'private') {
+        if ($token !== null) {
+            gos_lyre_me_delete('public/watch/' . $token . '.mp4');
+        }
+        $st = $mysql->prepare(
+            'UPDATE lyre_projects SET visibility = ? WHERE id = ? AND user_id = ?'
+        );
+        $st->execute(['private', $projectId, $userId]);
+        $fresh = gos_lyre_project_by_id($mysql, $userId, $projectId);
+        $out = ['ok' => true, 'project' => gos_lyre_project_public($fresh ?? $row)];
+        if ($token !== null) {
+            $out = array_merge($out, gos_lyre_watch_urls($token));
+        }
+        gos_api_json($out);
+    }
+    $compiled = trim((string) ($body['compiled_key'] ?? $body['compiledKey'] ?? ''));
+    if ($compiled === '') {
+        $compiled = (string) ($row['compiled_key'] ?? '');
+    }
+    $compiledKey = gos_lyre_compiled_key($boardId, $compiled);
+    if ($compiledKey === null) {
+        gos_api_json(['ok' => false, 'error' => 'compiled_missing'], 400);
+    }
+    if ($token === null) {
+        $token = gos_lyre_new_watch_token($mysql);
+    }
+    $dest = 'public/watch/' . $token . '.mp4';
+    $tmp = gos_lyre_me_download_tmp($compiledKey, 404, 'compiled_missing');
+    gos_lyre_me_upload_tmp($dest, $tmp, 'video/mp4');
+    $st = $mysql->prepare(
+        'UPDATE lyre_projects SET visibility = ?, watch_token = ?, compiled_key = ? WHERE id = ? AND user_id = ?'
+    );
+    $st->execute(['public', $token, $compiledKey, $projectId, $userId]);
+    $fresh = gos_lyre_project_by_id($mysql, $userId, $projectId);
+    gos_api_json(array_merge(
+        ['ok' => true, 'project' => gos_lyre_project_public($fresh ?? $row)],
+        gos_lyre_watch_urls($token)
+    ));
+}
+
+function gos_lyre_post_save_board(array $access, array $body): never
+{
+    $userId = gos_lyre_user_id($access);
+    $mysql = gos_lyre_mysql();
+    $id = trim((string) ($body['id'] ?? ''));
+    $boardId = trim((string) ($body['board_id'] ?? ''));
+    $row = null;
+    if ($id !== '') {
+        $row = gos_lyre_project_by_id($mysql, $userId, $id);
+        if ($row === null) {
+            $row = gos_lyre_project_by_board($mysql, $userId, $id);
+        }
+    }
+    if ($row === null && $boardId !== '') {
+        $row = gos_lyre_project_by_board($mysql, $userId, $boardId);
+    }
+    if ($row === null) {
+        gos_api_json(['ok' => false, 'error' => 'not_found'], 404);
+    }
+    $data = $body['data'] ?? null;
+    if (is_string($data) && $data !== '') {
+        $data = json_decode($data, true);
+    }
+    if (!is_array($data)) {
+        gos_api_json(['ok' => false, 'error' => 'data_required'], 400);
+    }
+    $target = (string) $row['board_id'];
+    gos_lyre_pg_update(gos_lyre_pg(), $target, $data);
+    $touch = $mysql->prepare(
+        'UPDATE lyre_projects SET updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?'
+    );
+    $touch->execute([(string) $row['id'], $userId]);
+    gos_api_json(['ok' => true, 'board_id' => $target]);
+}
 $httpMethod = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
 $qsAction = strtolower(trim((string) ($_GET['action'] ?? '')));
 
@@ -1328,5 +1419,8 @@ if ($action === 'imagine_video') {
 }
 if ($action === 'imagine_edit') {
     gos_lyre_imagine_edit($access, $body);
+}
+if ($action === 'publish') {
+    gos_lyre_post_publish($access, $body);
 }
 gos_api_json(['ok' => false, 'error' => 'unknown_action'], 400);

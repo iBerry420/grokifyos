@@ -18,6 +18,7 @@ data class LyrePendingOp(
     val boardSnapshot: String? = null,
     val key: String? = null,
     val localPath: String? = null,
+    val visibility: String? = null,
     val createdAtMs: Long = 0L,
     val failCount: Int = 0,
 )
@@ -78,6 +79,7 @@ class LyreCache(
         snapshotRel?.let { json.put("boardSnapshot", it) }
         op.key?.let { json.put("key", it) }
         op.localPath?.let { json.put("localPath", it) }
+        op.visibility?.let { json.put("visibility", it) }
         json.put("failCount", op.failCount)
         val f = File(dir, "$seq.json")
         f.writeText(json.toString())
@@ -136,6 +138,7 @@ class LyreCache(
                 boardSnapshot = o.optString("boardSnapshot").takeIf { it.isNotEmpty() },
                 key = o.optString("key").takeIf { it.isNotEmpty() },
                 localPath = o.optString("localPath").takeIf { it.isNotEmpty() },
+                visibility = o.optString("visibility").takeIf { it.isNotEmpty() },
                 createdAtMs = o.optLong("createdAtMs"),
                 failCount = o.optInt("failCount"),
             )

@@ -2,11 +2,13 @@ package io.grokify.os.apps.lyre
 
 import android.app.Application
 import android.net.Uri
+import android.util.Log
 import io.grokify.os.GrokifyApp
 import io.grokify.os.apps.plugin.HostApiKeyStore
 import io.grokify.os.data.ApiKeyIds
 import io.grokify.os.data.TokenStore
 import java.io.File
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -66,6 +68,15 @@ class LyreSession(
     private val _imagineBusy = MutableStateFlow(false)
     val imagineBusy: StateFlow<Boolean> = _imagineBusy
 
+    private val _project = MutableStateFlow<LyreProject?>(null)
+    val project: StateFlow<LyreProject?> = _project
+
+    private val _watchBusy = MutableStateFlow(false)
+    val watchBusy: StateFlow<Boolean> = _watchBusy
+
+    private val _watchError = MutableStateFlow<String?>(null)
+    val watchError: StateFlow<String?> = _watchError
+
     @Volatile
     private var running: Job? = null
 
@@ -81,6 +92,49 @@ class LyreSession(
         _board.value = board
         cache.writeBoardJson(boardId, LyreBoardCodec.encode(board))
         scope.launch { flushPending(boardId) }
+    }
+
+    fun bindProject(project: LyreProject?) {
+        _project.value = project
+        _watchError.value = null
+    }
+
+    fun insertAudioUri(frameId: String, uri: Uri, name: String) {
+        if (_busy.value != null || _imagineBusy.value) return
+        val epoch = boardEpoch.get()
+        running = scope.launch {
+            mutex.withLock {
+                val tmp = cache.tmpFile(requireBoardId(), ".bin")
+                val copied = runCatching {
+                    appCtx.contentResolver.openInputStream(uri)?.use { input ->
+                        tmp.outputStream().use { input.copyTo(it) }
+                    }
+                    tmp
+                }.getOrNull()
+                if (copied == null || !copied.isFile || copied.length() <= 0L) {
+                    val id = _boardId.value ?: return@withLock
+                    val board = _board.value ?: return@withLock
+                    fail(id, board, "cut_failed: extract", frameId)
+                    return@withLock
+                }
+                insertAudioLocked(frameId, copied, name.ifBlank { "Audio" }, epoch)
+            }
+        }
+    }
+
+    fun insertAudioFile(frameId: String, srcFile: File, name: String) {
+        if (_busy.value != null || _imagineBusy.value) return
+        val epoch = boardEpoch.get()
+        running = scope.launch {
+            mutex.withLock { insertAudioLocked(frameId, srcFile, name, epoch) }
+        }
+    }
+
+    fun publish(makePublic: Boolean) {
+        if (_watchBusy.value) return
+        scope.launch {
+            mutex.withLock { publishLocked(makePublic) }
+        }
     }
 
     fun apply(result: RuleResult) {
@@ -140,6 +194,117 @@ class LyreSession(
     }
 
     fun movieGens(): LyreMovieGens = gens
+
+    private suspend fun insertAudioLocked(frameId: String, srcFile: File, name: String, capturedEpoch: Int) {
+        val id = _boardId.value ?: return
+        val board = _board.value ?: return
+        if (capturedEpoch != boardEpoch.get()) return
+        if (_busy.value != null) return
+        _busy.value = LyreJob(CutKind.EXTRACT, id)
+        try {
+            var input = srcFile
+            var duration = 0.1
+            try {
+                val probe = cutter.probe(srcFile)
+                if (probe.durationSec > 0.0) duration = probe.durationSec
+                if (probe.width > 0 && probe.height > 0 && probe.hasAudio) {
+                    val cut = withFgs(probe.durationSec > 15.0) { cutter.extractAudio(srcFile) }
+                    input = cut.file
+                    if (cut.durationSec > 0.0) duration = cut.durationSec
+                }
+            } catch (_: Exception) {
+                // keep original bytes; duration floor is 0.1
+            }
+            if (!input.isFile || input.length() <= 0L) {
+                fail(id, board, "cut_failed: extract", frameId)
+                return
+            }
+            val key = "boards/$id/audio/${newAudioId()}.m4a"
+            cache.importObject(id, key, input)
+            enqueuePendingFor(
+                id,
+                LyrePendingOp(0, "storage_put", key = key, localPath = cache.objectRel(id, key)),
+            )
+            val result = LyreRules.insertAudio(board, frameId, key, name.ifBlank { "Audio" }, duration)
+            if (result.board === board) return
+            applyLocked(result, capturedEpoch)
+        } finally {
+            _busy.value = null
+        }
+    }
+
+    private suspend fun publishLocked(makePublic: Boolean) {
+        val id = _boardId.value ?: return
+        val vis = if (makePublic) "public" else "private"
+        val compiled = _board.value?.movie?.src?.takeIf { it.isNotBlank() }
+        val publishId = _project.value?.id?.takeIf { it.isNotBlank() } ?: id
+        _watchBusy.value = true
+        _watchError.value = null
+        try {
+            if (makePublic) {
+                if (compiled == null) {
+                    _watchError.value = "compiled_missing"
+                    return
+                }
+                val local = cache.resolve(id, compiled)?.takeIf { it.length() > 0L }
+                if (local != null) {
+                    var putOk = false
+                    if (cache.online()) {
+                        val put = runCatching { api.putStorage(compiled, local) }.getOrNull()
+                        putOk = put != null && put.optBoolean("ok", false)
+                    }
+                    if (!putOk) {
+                        enqueuePendingFor(
+                            id,
+                            LyrePendingOp(0, "storage_put", key = compiled, localPath = cache.objectRel(id, compiled)),
+                        )
+                        // Do not enqueue/run publish until this compiled put is ok (PHP copies grokme).
+                        _watchError.value = if (cache.online()) "storage_put_failed" else "offline"
+                        return
+                    }
+                } else if (cache.online()) {
+                    flushPending(id)
+                }
+            }
+            if (!cache.online()) {
+                queuePublish(id, vis, compiled, "offline")
+                return
+            }
+            val resp = api.publish(publishId, vis, compiled)
+            if (resp.optBoolean("ok", false)) {
+                resp.optJSONObject("project")?.let { _project.value = lyreProjectFromJson(it) }
+                Log.i("Lyre", "publish $vis")
+                activity(id, "publish", "publish $vis", null, null, compiled)
+            } else {
+                val err = resp.optString("error").ifBlank { "publish_failed" }
+                Log.w("Lyre", "publish failed $err")
+                queuePublish(id, vis, compiled, err)
+            }
+        } catch (e: Exception) {
+            Log.w("Lyre", "publish failed")
+            queuePublish(id, vis, compiled, e.message ?: "publish_failed")
+        } finally {
+            _watchBusy.value = false
+        }
+    }
+
+    private suspend fun queuePublish(id: String, vis: String, compiled: String?, error: String) {
+        enqueuePendingFor(
+            id,
+            LyrePendingOp(0, "publish", key = compiled, visibility = vis),
+        )
+        if (cache.online()) {
+            flushPending(id)
+            if (cache.listPending(id).any { it.second.type == "publish" && it.second.visibility == vis }) {
+                _watchError.value = error
+            }
+        } else {
+            _watchError.value = error
+        }
+    }
+
+    private fun newAudioId(): String = "lc_" + UUID.randomUUID().toString().replace("-", "").take(8)
+
 
     fun generateStill(
         frameId: String,
@@ -788,10 +953,29 @@ class LyreSession(
         flushMutex.withLock {
             val ops = cache.listPending(boardId)
             val latestSave = ops.filter { it.second.type == "save_board" }.maxOfOrNull { it.second.seq }
-            for ((file, op) in ops) {
+            val pendingPutCount = mutableMapOf<String, Int>()
+            for ((_, op) in ops) {
+                if (op.type != "storage_put") continue
+                val k = op.key ?: continue
+                pendingPutCount[k] = (pendingPutCount[k] ?: 0) + 1
+            }
+            val failedPutsThisSweep = mutableSetOf<String>()
+            fun isPublicPublish(op: LyrePendingOp): Boolean {
+                if (op.type != "publish") return false
+                return (op.visibility?.takeIf { it == "public" || it == "private" } ?: "public") == "public"
+            }
+            // Public publish copies grokme; run compiled puts first, then skip if put pending/failed.
+            val ordered = ops.filterNot { isPublicPublish(it.second) } + ops.filter { isPublicPublish(it.second) }
+            for ((file, op) in ordered) {
                 if (op.type == "save_board" && latestSave != null && op.seq != latestSave) {
                     cache.deletePending(file)
                     continue
+                }
+                if (isPublicPublish(op)) {
+                    val k = op.key
+                    if (k != null && ((pendingPutCount[k] ?: 0) > 0 || k in failedPutsThisSweep)) {
+                        continue
+                    }
                 }
                 val ok = runCatching {
                     when (op.type) {
@@ -802,11 +986,21 @@ class LyreSession(
                             val resp = api.saveBoard(boardId, data)
                             resp.optBoolean("ok", false)
                         }
-                        "storage_put", "publish" -> {
+                        "storage_put" -> {
                             if (!cache.online()) return@runCatching false
                             val key = op.key ?: return@runCatching false
                             val local = cache.pendingFile(op, boardId) ?: return@runCatching false
                             val resp = api.putStorage(key, local)
+                            resp.optBoolean("ok", false)
+                        }
+                        "publish" -> {
+                            if (!cache.online()) return@runCatching false
+                            val vis = op.visibility?.takeIf { it == "public" || it == "private" } ?: "public"
+                            val publishId = _project.value?.id?.takeIf { it.isNotBlank() } ?: boardId
+                            val resp = api.publish(publishId, vis, op.key)
+                            if (resp.optBoolean("ok", false)) {
+                                resp.optJSONObject("project")?.let { _project.value = lyreProjectFromJson(it) }
+                            }
                             resp.optBoolean("ok", false)
                         }
                         else -> false
@@ -814,10 +1008,19 @@ class LyreSession(
                 }.getOrDefault(false)
                 if (ok) {
                     cache.deletePending(file)
+                    if (op.type == "storage_put") {
+                        op.key?.let { k -> pendingPutCount[k] = (pendingPutCount[k] ?: 1) - 1 }
+                    }
                 } else {
+                    if (op.type == "storage_put") {
+                        op.key?.let { failedPutsThisSweep.add(it) }
+                    }
                     val fails = op.failCount + 1
                     if (fails >= 5) {
                         cache.deletePending(file)
+                        if (op.type == "storage_put") {
+                            op.key?.let { k -> pendingPutCount[k] = (pendingPutCount[k] ?: 1) - 1 }
+                        }
                         activity(boardId, "pending_drop", "dropped ${op.type} after 5 failures", null, null, op.key)
                     } else {
                         cache.writePending(boardId, op.copy(failCount = fails))

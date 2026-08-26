@@ -1,5 +1,8 @@
 package io.grokify.os.apps.lyre.ui
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -66,6 +69,10 @@ import coil.compose.AsyncImage
 import io.grokify.os.apps.lyre.BoardData
 import io.grokify.os.apps.lyre.Frame
 import io.grokify.os.apps.lyre.LayerClip
+import io.grokify.os.apps.lyre.LyreRules
+import io.grokify.os.apps.lyre.LyreProject
+import io.grokify.os.apps.lyre.LyreApi
+import io.grokify.os.apps.lyre.LibraryAudio
 import io.grokify.os.apps.lyre.LyreCache
 import io.grokify.os.apps.lyre.LyreClip
 import io.grokify.os.apps.lyre.LyreClockTarget
@@ -124,6 +131,12 @@ fun LyreEditor(
     onImportUri: (afterFrameId: String?, uri: android.net.Uri) -> Unit = { _, _ -> },
     onImportFile: (afterFrameId: String?, file: File, mime: String) -> Unit = { _, _, _ -> },
     onAddRef: (frameId: String, uri: android.net.Uri) -> Unit = { _, _ -> },
+    project: LyreProject? = null,
+    watchBusy: Boolean = false,
+    watchError: String? = null,
+    watchApi: LyreApi? = null,
+    onPublish: (Boolean) -> Unit = {},
+    onInsertAudioUri: (String, Uri, String) -> Unit = { _, _, _ -> },
 ) {
     val context = LocalContext.current
     val player = remember { LyrePlayer(context.applicationContext) }
@@ -142,6 +155,20 @@ fun LyreEditor(
     var program by remember { mutableStateOf<List<LyrePlayItem>>(emptyList()) }
     var onHold by remember { mutableStateOf(false) }
     var clipSheet by remember { mutableStateOf<ClipSheetTarget?>(null) }
+    var watchOpen by remember { mutableStateOf(false) }
+    var audioFrameId by remember { mutableStateOf<String?>(null) }
+    val pickAudio = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val frameId = audioFrameId ?: return@rememberLauncherForActivityResult
+        audioFrameId = null
+        if (uri == null || busy) return@rememberLauncherForActivityResult
+        onInsertAudioUri(frameId, uri, uri.lastPathSegment?.substringAfterLast('/') ?: "Audio")
+    }
+    val pickAudioFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val frameId = audioFrameId ?: return@rememberLauncherForActivityResult
+        audioFrameId = null
+        if (uri == null || busy) return@rememberLauncherForActivityResult
+        onInsertAudioUri(frameId, uri, uri.lastPathSegment?.substringAfterLast('/') ?: "Audio")
+    }
 
     fun persistPlayhead() {
         store.playhead = playhead
@@ -284,6 +311,14 @@ fun LyreEditor(
                     .clickable { switcher = true }
                     .padding(end = 8.dp),
             )
+            TextButton(onClick = { watchOpen = true }) {
+                Text(
+                    if (project?.visibility == "public") "Watch" else "Public",
+                    color = if (project?.visibility == "public") GrokifyColors.GlowRose else GrokifyColors.TextPrimary,
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 14.sp,
+                )
+            }
             TextButton(
                 onClick = {
                     museOpen = !museOpen
@@ -464,7 +499,30 @@ fun LyreEditor(
             onImportUri = { uri -> onImportUri(liveFrame.id, uri) },
             onImportFile = { file, mime -> onImportFile(liveFrame.id, file, mime) },
             onAddRef = { uri -> onAddRef(liveFrame.id, uri) },
+            onPickAudio = {
+                audioFrameId = sheet.frame.id
+                pickAudio.launch("audio/*")
+            },
+            onPickAudioFile = {
+                audioFrameId = sheet.frame.id
+                pickAudioFile.launch(arrayOf("audio/*"))
+            },
+            onPickLibraryAudio = { item ->
+                insertLibraryAudio(board, sheet.frame.id, item, onApply)
+            },
             onDismiss = { clipSheet = null },
+        )
+    }
+
+    val api = watchApi
+    if (watchOpen && api != null) {
+        LyreWatch(
+            project = project,
+            watchBusy = watchBusy,
+            watchError = watchError,
+            api = api,
+            onPublish = onPublish,
+            onDismiss = { watchOpen = false },
         )
     }
 }
@@ -866,4 +924,21 @@ private fun posterFile(
 private fun fmtTime(sec: Float): String {
     val s = sec.coerceAtLeast(0f).toInt()
     return "%d:%02d".format(s / 60, s % 60)
+}
+
+private fun insertLibraryAudio(
+    board: BoardData,
+    frameId: String,
+    item: LibraryAudio,
+    onApply: (RuleResult) -> Unit,
+) {
+    onApply(
+        LyreRules.insertAudio(
+            board,
+            frameId,
+            item.src,
+            item.name.ifBlank { "Audio" },
+            item.durationSec.coerceAtLeast(0.1),
+        ),
+    )
 }

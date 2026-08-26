@@ -1,6 +1,7 @@
 package io.grokify.os.apps.lyre.ui
 
 import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -36,6 +37,7 @@ import io.grokify.os.apps.GROK_VOICES
 import io.grokify.os.apps.lyre.BoardData
 import io.grokify.os.apps.lyre.Frame
 import io.grokify.os.apps.lyre.LayerClip
+import io.grokify.os.apps.lyre.LibraryAudio
 import io.grokify.os.apps.lyre.LyreCache
 import io.grokify.os.apps.lyre.LyreImagine
 import io.grokify.os.apps.lyre.LyreMovie
@@ -43,6 +45,9 @@ import io.grokify.os.apps.lyre.LyreRules
 import io.grokify.os.apps.lyre.RuleResult
 import io.grokify.os.ui.theme.GrokifyColors
 import java.io.File
+
+/** false until burnAudioTwoBedsWithGapUs is device-green; chips must not call burnAudio/apply. */
+internal const val LYRE_BURN_AUDIO_DEVICE_GREEN = false
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -77,6 +82,9 @@ fun LyreClipSheet(
     onImportUri: (Uri) -> Unit = {},
     onImportFile: (File, String) -> Unit = { _, _ -> },
     onAddRef: (Uri) -> Unit = {},
+    onPickAudio: (() -> Unit)? = null,
+    onPickAudioFile: (() -> Unit)? = null,
+    onPickLibraryAudio: ((LibraryAudio) -> Unit)? = null,
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -90,6 +98,8 @@ fun LyreClipSheet(
         LyreMovie.canStitchClip(clip.id, clip.src, board.videoLayers, board.movie)
     val canPop = (board.movie?.parts?.size ?: 0) > 1
     val leftover = LyreRules.leftoverFrame(board, frame.id) != null
+    val leftoverFrame = leftover
+    val canBurn = board.movie != null && board.audioLayers.any { it.clips.isNotEmpty() }
     val canMutate = enabled && !imagineBusy
     val canImagine = canMutate && leftover &&
         frame.generating != true && frame.videoGenerating != true
@@ -221,6 +231,9 @@ fun LyreClipSheet(
                         SheetChip("Mute", selected = false, enabled = canMutate, onClick = {
                             run(LyreRules.mute(board, clip.id))
                         })
+                        SheetChip("Extract", selected = false, enabled = canMutate, onClick = {
+                            run(LyreRules.extractAudio(board, clip.id))
+                        })
                         SheetChip("Restore", selected = false, enabled = canMutate, onClick = {
                             run(LyreRules.restoreClip(board, clip.id))
                         })
@@ -256,6 +269,41 @@ fun LyreClipSheet(
                                 }
                             })
                         }
+                    }
+                    // Audio/Files/Library is the PR 7 insert surface; leftover mic/camera capture is PR 8.
+                    if (leftoverFrame && onPickAudio != null) {
+                        SheetChip("Audio", selected = false, enabled = canMutate, onClick = {
+                            onPickAudio()
+                            onDismiss()
+                        })
+                    }
+                    if (leftoverFrame && onPickAudioFile != null) {
+                        SheetChip("Files", selected = false, enabled = canMutate, onClick = {
+                            onPickAudioFile()
+                            onDismiss()
+                        })
+                    }
+                    if (leftoverFrame && onPickLibraryAudio != null) {
+                        board.libraryAudio.filter { it.deletedAt == null && it.src.isNotEmpty() }
+                            .forEach { item ->
+                                SheetChip(item.name.ifBlank { "Library" }, selected = false, enabled = canMutate, onClick = {
+                                    onPickLibraryAudio(item)
+                                    onDismiss()
+                                })
+                            }
+                    }
+                    if (canBurn) {
+                        SheetChip("Burn", selected = false, enabled = canMutate, onClick = {
+                            if (!LYRE_BURN_AUDIO_DEVICE_GREEN) {
+                                Toast.makeText(
+                                    context,
+                                    "Burn-audio mix isn't device-green",
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                                return@SheetChip
+                            }
+                            run(LyreRules.burnAudio(board))
+                        })
                     }
                 } else {
                     SheetChip("Restore", selected = false, enabled = canMutate, onClick = {
