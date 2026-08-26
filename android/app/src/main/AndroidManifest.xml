@@ -389,6 +389,20 @@
             </intent-filter>
         </receiver>
 
+        <service
+            android:name=".apps.gbot.GbotWatchService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+        <receiver
+            android:name=".apps.gbot.GbotWatchReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="io.grokify.os.GBOT_WATCH_CHECK" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
         <!-- Phone ↔ Wear: push SpaceXAI API key to watch over Data Layer -->
         <service
             android:name=".wearbridge.WearApiKeyListenerService"
