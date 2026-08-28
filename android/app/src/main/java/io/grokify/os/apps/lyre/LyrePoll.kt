@@ -117,9 +117,7 @@ object LyrePoll {
 
     fun onSaveResponse(ok: Boolean, error: String?, queuedLocal: Boolean = false): LyreSavePoll {
         if (ok) return if (queuedLocal) LyreSavePoll.RETRY else LyreSavePoll.SAVED
-        if (error == "conflict") {
-            return if (queuedLocal) LyreSavePoll.RETRY else LyreSavePoll.CONFLICT_RELOAD
-        }
+        if (error == "conflict") return LyreSavePoll.CONFLICT_RELOAD
         return LyreSavePoll.KEEP_DIRTY
     }
 }
