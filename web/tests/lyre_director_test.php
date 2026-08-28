@@ -162,6 +162,20 @@ foreach ($movedLoose['videoLayers'][0]['clips'] as $c) {
 }
 expect_eq($extraM['startSec'] ?? null, 18.0, 'move leftover-only no movie lock');
 
+$picStitched = gos_lyre_picture_video_clips($stitched);
+expect_eq(array_map(static fn ($c) => $c['id'] ?? '', $picStitched), ['lc_movie'], 'stitched picture lane emits lc_movie');
+expect_eq($picStitched[0]['startSec'] ?? null, 0.0, 'lc_movie starts at 0');
+expect_true(gos_lyre_num($picStitched[0]['durationSec'] ?? 0) >= 6.9, 'lc_movie spans play duration');
+$underMovie = add_leftover($stitched, 'lc_extra', 20.0, 2.0);
+$blocked = gos_lyre_apply_move($underMovie, 'lc_extra', 1.0);
+$extraStart = null;
+foreach ($blocked['videoLayers'][0]['clips'] as $c) {
+    if (($c['id'] ?? '') === 'lc_extra') {
+        $extraStart = $c['startSec'] ?? null;
+    }
+}
+expect_eq($extraStart, 20.0, 'leftover-only move under stitched movie is no-op');
+
 $err = catch_error(static fn () => gos_lyre_apply_delete($unstitched, 'lc_movie'));
 expect_eq($err?->error, 'movie_locked', 'delete lc_movie locked');
 $err = catch_error(static fn () => gos_lyre_apply_delete($stitched, 'lc_a'));
@@ -324,6 +338,19 @@ $scene = gos_lyre_director_scene($access, [
     'logline' => 'hearth',
 ]);
 expect_true(str_starts_with((string) ($scene['scene_id'] ?? ''), 'sc_'), 'scene id prefix');
+expect_eq($scene['activity']['sceneId'] ?? null, $scene['scene_id'] ?? 'x', 'scene create activity has sceneId');
+
+$spoof = gos_lyre_director_activity_append($access, [
+    'board_id' => $bid,
+    'text' => 'I am a bot',
+    'actor' => 'bot',
+]);
+expect_eq($spoof['activity']['actor'] ?? null, 'phone', 'device append forces actor=phone');
+$mcpLine = gos_lyre_normalize_activity_line(['text' => 'hi', 'actor' => 'phone'], 'bot');
+expect_eq($mcpLine['actor'] ?? null, 'bot', 'normalize uses caller actor not payload');
+
+$err = catch_error(static fn () => gos_lyre_pg_update(null, 'x', ['title' => 'n']));
+expect_eq($err?->error, 'expected_updated_at_required', 'LWW pg_update requires stamp');
 
 $place = gos_lyre_director_place($access, [
     'board_id' => $bid,
@@ -341,6 +368,38 @@ $err = catch_error(static fn () => gos_lyre_director_trim($access, [
     'end_sec' => 1,
 ]));
 expect_eq($err?->error, 'movie_locked', 'director trim lc_movie via mutate');
+
+$pid2 = str_repeat('d', 32);
+$bid2 = 'lyre_phone_move-1';
+gos_lyre_test_put_project([
+    'id' => $pid2,
+    'user_id' => 7,
+    'name' => 'Move',
+    'visibility' => 'private',
+    'board_id' => $bid2,
+    'is_odysseus' => 0,
+    'updated_at' => 'old',
+]);
+$stitchedLoose = add_leftover($stitched, 'lc_extra', 20.0, 2.0);
+gos_lyre_test_put_board($bid2, $stitchedLoose, '2026-08-28 17:00:00.000000+00');
+$bumpsBefore = gos_lyre_test_mysql_bumps();
+$noopMove = gos_lyre_director_move($access, [
+    'board_id' => $bid2,
+    'clip_id' => 'lc_extra',
+    'start_sec' => 1,
+]);
+expect_eq($noopMove['ok'] ?? null, true, 'overlap move ok');
+expect_eq($noopMove['noop'] ?? null, true, 'overlap move is noop');
+expect_eq($noopMove['updated_at'] ?? null, '2026-08-28 17:00:00.000000+00', 'noop keeps stamp');
+expect_eq(gos_lyre_test_mysql_bumps(), $bumpsBefore, 'noop move does not bump mysql');
+$stored = gos_lyre_test_store()['boards'][$bid2]['payload'] ?? [];
+$storedStart = null;
+foreach (($stored['videoLayers'][0]['clips'] ?? []) as $c) {
+    if (($c['id'] ?? '') === 'lc_extra') {
+        $storedStart = $c['startSec'] ?? null;
+    }
+}
+expect_eq($storedStart, 20.0, 'director leftover move under movie did not persist');
 
 function lyre_director_rmdir(string $dir): void
 {

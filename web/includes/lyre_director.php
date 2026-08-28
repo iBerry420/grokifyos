@@ -806,7 +806,9 @@ function gos_lyre_picture_video_clips(array $board): array
         }
     }
     $stitched = count($memberIds) > 1;
+    $live = $stitched ? gos_lyre_resolved_movie($board) : null;
     $out = [];
+    $movieEmitted = false;
     foreach ($stills as $sc) {
         $frame = $sc['frame'];
         $fid = gos_lyre_str($frame['id'] ?? '');
@@ -822,6 +824,43 @@ function gos_lyre_picture_video_clips(array $board): array
             continue;
         }
         if ($stitched && is_array($existing) && isset($memberIds[gos_lyre_str($existing['id'] ?? '')])) {
+            if (!$movieEmitted) {
+                $members = [];
+                foreach ($stills as $m) {
+                    $mfid = gos_lyre_str($m['frame']['id'] ?? '');
+                    $ex = $byFrame[$mfid] ?? null;
+                    if (is_array($ex) && isset($memberIds[gos_lyre_str($ex['id'] ?? '')])) {
+                        $members[] = $m;
+                    }
+                }
+                $start = $members !== [] ? gos_lyre_num($members[0]['start'] ?? 0) : gos_lyre_num($sc['start'] ?? 0);
+                if (is_array($live)) {
+                    $play = gos_lyre_movie_play_duration($live);
+                    $native = gos_lyre_num($live['durationSec'] ?? $play);
+                    $movieSrc = gos_lyre_str($live['src'] ?? '') !== '' ? gos_lyre_str($live['src'] ?? '') : $src;
+                } else {
+                    $sum = 0.0;
+                    foreach ($members as $m) {
+                        $sum += gos_lyre_num($m['length'] ?? 0);
+                    }
+                    $play = max(GOS_LYRE_MIN_DUR, $sum);
+                    $native = $play;
+                    $movieSrc = $src;
+                }
+                $out[] = [
+                    'id' => 'lc_movie',
+                    'src' => $movieSrc,
+                    'name' => 'Movie · ' . (string) count($memberIds),
+                    'startSec' => $start,
+                    'durationSec' => $play,
+                    'trimInSec' => 0.0,
+                    'sourceDurationSec' => $native,
+                    'linkedFrameId' => $members !== []
+                        ? gos_lyre_str($members[0]['frame']['id'] ?? $fid)
+                        : $fid,
+                ];
+                $movieEmitted = true;
+            }
             continue;
         }
         $clip = is_array($existing) ? $existing : [
@@ -2022,10 +2061,10 @@ function gos_lyre_director_resolve(array $access, array $body, bool $mutating): 
 /**
  * @param array<string, mixed> $access
  * @param array<string, mixed> $body
- * @param array<string, mixed> $activity
+ * @param array<string, mixed>|callable $activity
  * @return array<string, mixed>
  */
-function gos_lyre_director_mutate(array $access, array $body, callable $mutator, array $activity): array
+function gos_lyre_director_mutate(array $access, array $body, callable $mutator, array|callable $activity): array
 {
     $row = gos_lyre_director_resolve($access, $body, true);
     $boardId = gos_lyre_str($row['board_id'] ?? '');
@@ -2044,9 +2083,21 @@ function gos_lyre_director_mutate(array $access, array $body, callable $mutator,
         if (!is_array($next)) {
             gos_lyre_fail('invalid_board', 400);
         }
+        $stamp = (string) ($pgRow['updated_at'] ?? '');
+        if ($next === $board) {
+            return [
+                'ok' => true,
+                'board_id' => $boardId,
+                'updated_at' => $stamp,
+                'noop' => true,
+            ];
+        }
         $cas = gos_lyre_pg_update_cas(gos_lyre_pg_maybe(), $boardId, $next, $expected);
         gos_lyre_touch_project(gos_lyre_user_id($access), gos_lyre_str($row['id'] ?? ''));
-        $act = $activity;
+        $act = is_callable($activity) ? $activity($next, $row) : $activity;
+        if (!is_array($act)) {
+            $act = [];
+        }
         $act['ts'] = (int) round(microtime(true) * 1000);
         $act['projectId'] = gos_lyre_str($row['id'] ?? '');
         $act['actor'] = gos_lyre_is_mcp($access) ? 'bot' : 'phone';
@@ -2138,7 +2189,7 @@ function gos_lyre_normalize_activity_line(array $raw, string $actorDefault): arr
         'type' => gos_lyre_str($raw['type'] ?? 'edit') !== '' ? gos_lyre_str($raw['type'] ?? 'edit') : 'edit',
         'projectId' => gos_lyre_str($raw['projectId'] ?? ''),
         'summary' => $summary,
-        'actor' => gos_lyre_str($raw['actor'] ?? '') !== '' ? gos_lyre_str($raw['actor'] ?? '') : $actorDefault,
+        'actor' => $actorDefault,
     ];
     foreach (['sceneId', 'frameId', 'clipId', 'op'] as $k) {
         $v = gos_lyre_str($raw[$k] ?? '');
@@ -2168,6 +2219,7 @@ function gos_lyre_director_activity_append(array $access, array $body): array
             continue;
         }
         $line = gos_lyre_normalize_activity_line($raw, $actor);
+        $line['actor'] = $actor;
         if ($line['projectId'] === '') {
             $line['projectId'] = gos_lyre_str($row['id'] ?? '');
         }
@@ -2287,12 +2339,14 @@ function gos_lyre_director_scene(array $access, array $body): array
         $board['scenes'] = $outScenes;
 
         return $board;
-    }, [
-        'type' => 'scene',
-        'sceneId' => $sceneId,
-        'summary' => $sceneIdIn === '' ? 'Scene created' : 'Scene updated',
-        'op' => 'scene',
-    ]);
+    }, function () use (&$sceneId, $sceneIdIn) {
+        return [
+            'type' => 'scene',
+            'sceneId' => $sceneId,
+            'summary' => $sceneIdIn === '' ? 'Scene created' : 'Scene updated',
+            'op' => 'scene',
+        ];
+    });
     $out['scene_id'] = $sceneId;
 
     return $out;

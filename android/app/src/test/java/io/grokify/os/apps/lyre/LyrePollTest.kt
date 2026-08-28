@@ -71,6 +71,8 @@ class LyrePollTest {
         assertEquals(LyreSavePoll.SAVED, LyrePoll.onSaveResponse(true, null))
         assertEquals(LyreSavePoll.CONFLICT_RELOAD, LyrePoll.onSaveResponse(false, "conflict"))
         assertEquals(LyreSavePoll.KEEP_DIRTY, LyrePoll.onSaveResponse(false, "network"))
+        assertEquals(LyreSavePoll.RETRY, LyrePoll.onSaveResponse(true, null, queuedLocal = true))
+        assertEquals(LyreSavePoll.RETRY, LyrePoll.onSaveResponse(false, "conflict", queuedLocal = true))
     }
 
     @Test

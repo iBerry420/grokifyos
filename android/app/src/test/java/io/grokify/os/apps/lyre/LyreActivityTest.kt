@@ -105,6 +105,19 @@ class LyreActivityTest {
     }
 
     @Test
+    fun replaceFromServerEmptyTruncatesToZeroBytes() {
+        val dir = createTempDirectory("lyre-act").toFile()
+        val file = File(dir, "activity.jsonl")
+        val log = LyreActivity(file)
+        log.append(LyreActivityLine(1L, "still", "p1", summary = "keep"))
+        assertTrue(file.length() > 0L)
+        log.replaceFromServer(emptyList())
+        assertEquals(0L, file.length())
+        assertTrue(log.isEmpty())
+        assertTrue(log.readAll().isEmpty())
+    }
+
+    @Test
     fun skipsBlankLines() {
         val dir = createTempDirectory("lyre-act").toFile()
         val file = File(dir, "activity.jsonl")

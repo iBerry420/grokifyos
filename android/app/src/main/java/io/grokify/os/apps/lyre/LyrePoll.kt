@@ -53,6 +53,7 @@ enum class LyreSavePoll {
     SAVED,
     CONFLICT_RELOAD,
     KEEP_DIRTY,
+    RETRY,
 }
 
 object LyrePoll {
@@ -114,9 +115,11 @@ object LyrePoll {
         )
     }
 
-    fun onSaveResponse(ok: Boolean, error: String?): LyreSavePoll {
-        if (ok) return LyreSavePoll.SAVED
-        if (error == "conflict") return LyreSavePoll.CONFLICT_RELOAD
+    fun onSaveResponse(ok: Boolean, error: String?, queuedLocal: Boolean = false): LyreSavePoll {
+        if (ok) return if (queuedLocal) LyreSavePoll.RETRY else LyreSavePoll.SAVED
+        if (error == "conflict") {
+            return if (queuedLocal) LyreSavePoll.RETRY else LyreSavePoll.CONFLICT_RELOAD
+        }
         return LyreSavePoll.KEEP_DIRTY
     }
 }

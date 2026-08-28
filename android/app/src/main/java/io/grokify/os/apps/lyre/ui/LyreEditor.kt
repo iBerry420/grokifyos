@@ -2,6 +2,7 @@ package io.grokify.os.apps.lyre.ui
 
 import android.net.Uri
 import android.os.SystemClock
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -185,12 +186,14 @@ fun LyreEditor(
     var scrubbing by remember { mutableStateOf(false) }
     val activity = remember(boardId) { LyreActivity(cache.activityFile(boardId)) }
     var saveJob by remember { mutableStateOf<Job?>(null) }
+    var pendingSave by remember(boardId) { mutableStateOf(false) }
     var boardDirty by remember(boardId) { mutableStateOf(false) }
     var lastSeenUpdatedAt by remember(boardId) {
         mutableStateOf(initialUpdatedAt.ifBlank { cache.readBoardStamp(boardId).orEmpty() })
     }
     var lastActivityBytes by remember(boardId) { mutableStateOf(-1L) }
     var serverBanner by remember(boardId) { mutableStateOf<String?>(null) }
+    var pollReady by remember(boardId) { mutableStateOf(false) }
     val playEpoch = remember { AtomicInteger(0) }
     val liveRef = rememberUpdatedState(live)
     val stillsRef = rememberUpdatedState(stills)
@@ -221,19 +224,20 @@ fun LyreEditor(
     }
 
     suspend fun pullActivity() {
-        val json = withContext(Dispatchers.IO) { api.activity(boardId) }
-        if (!json.optBoolean("ok", false)) return
-        val lines = LyreActivitySync.linesFromJson(json)
-        withContext(Dispatchers.IO) { activity.replaceFromServer(lines) }
-        val head = withContext(Dispatchers.IO) { api.head(boardId) }
-        lastActivityBytes = LyreHead.fromJson(head).activityBytes
+        val bytes = withContext(Dispatchers.IO) {
+            val json = api.activity(boardId)
+            if (!json.optBoolean("ok", false)) return@withContext null
+            activity.replaceFromServer(LyreActivitySync.linesFromJson(json))
+            LyreHead.fromJson(api.head(boardId)).activityBytes
+        }
+        if (bytes != null) lastActivityBytes = bytes
         activityTick++
     }
 
     suspend fun reloadFromServer() {
         val json = withContext(Dispatchers.IO) { api.board(boardId) }
         if (!json.optBoolean("ok", false)) {
-            genStatus = json.optString("error").ifBlank { "reload_failed" }
+            Toast.makeText(context, json.optString("error").ifBlank { "reload_failed" }, Toast.LENGTH_SHORT).show()
             return
         }
         val data = json.optJSONObject("data") ?: JSONObject()
@@ -250,74 +254,118 @@ fun LyreEditor(
         pullActivity()
     }
 
+    fun scheduleSave() {
+        val current = saveJob
+        if (current != null && current.isActive) {
+            pendingSave = true
+            return
+        }
+        saveJob = scope.launch {
+            delay(700)
+            do {
+                pendingSave = false
+                val snapshot = live
+                val stamp = lastSeenUpdatedAt
+                val resp = withContext(Dispatchers.IO) {
+                    val json = LyreBoardCodec.encode(snapshot)
+                    cache.writeBoardJson(boardId, json)
+                    api.saveBoard(store.projectId, json, stamp)
+                }
+                val queued = pendingSave
+                when (LyrePoll.onSaveResponse(resp.optBoolean("ok", false), resp.optString("error"), queued)) {
+                    LyreSavePoll.SAVED -> {
+                        val nextStamp = resp.optString("updated_at")
+                        if (nextStamp.isNotEmpty()) {
+                            lastSeenUpdatedAt = nextStamp
+                            withContext(Dispatchers.IO) { cache.writeBoardStamp(boardId, nextStamp) }
+                        }
+                        boardDirty = false
+                        serverBanner = null
+                    }
+                    LyreSavePoll.RETRY -> {
+                        val nextStamp = resp.optString("updated_at")
+                        if (nextStamp.isNotEmpty()) {
+                            lastSeenUpdatedAt = nextStamp
+                            withContext(Dispatchers.IO) { cache.writeBoardStamp(boardId, nextStamp) }
+                        }
+                        pendingSave = true
+                    }
+                    LyreSavePoll.CONFLICT_RELOAD -> {
+                        boardDirty = false
+                        Toast.makeText(context, "conflict", Toast.LENGTH_SHORT).show()
+                        reloadFromServer()
+                        saveJob = null
+                        return@launch
+                    }
+                    LyreSavePoll.KEEP_DIRTY -> {
+                        saveJob = null
+                        return@launch
+                    }
+                }
+            } while (pendingSave)
+            saveJob = null
+        }
+    }
+
     fun commit(next: BoardData, summary: String, type: String = "edit") {
         live = next
         onBoardChange(next)
         boardDirty = true
         logActivity(type, summary)
-        saveJob?.cancel()
-        saveJob = scope.launch {
-            delay(700)
-            val resp = withContext(Dispatchers.IO) {
-                val json = LyreBoardCodec.encode(next)
-                cache.writeBoardJson(boardId, json)
-                api.saveBoard(store.projectId, json, lastSeenUpdatedAt)
-            }
-            when (LyrePoll.onSaveResponse(resp.optBoolean("ok", false), resp.optString("error"))) {
-                LyreSavePoll.SAVED -> {
-                    val stamp = resp.optString("updated_at")
-                    if (stamp.isNotEmpty()) {
-                        lastSeenUpdatedAt = stamp
-                        withContext(Dispatchers.IO) { cache.writeBoardStamp(boardId, stamp) }
-                    }
-                    boardDirty = false
-                    serverBanner = null
-                }
-                LyreSavePoll.CONFLICT_RELOAD -> {
-                    saveJob = null
-                    boardDirty = false
-                    genStatus = "conflict"
-                    reloadFromServer()
-                }
-                LyreSavePoll.KEEP_DIRTY -> Unit
-            }
-            saveJob = null
-        }
+        scheduleSave()
     }
 
     LaunchedEffect(boardId) {
-        withContext(Dispatchers.IO) {
+        pollReady = false
+        val seenAtStart = lastSeenUpdatedAt
+        val boardAtOpen = live
+        data class OpenSync(val stamp: String, val bytes: Long)
+        val sync = withContext(Dispatchers.IO) {
             val headJson = api.head(boardId)
             val head = LyreHead.fromJson(headJson)
-            if (lastSeenUpdatedAt.isEmpty() && head.updatedAt.isNotEmpty()) {
-                lastSeenUpdatedAt = head.updatedAt
-                cache.writeBoardStamp(boardId, head.updatedAt)
+            var stamp = seenAtStart
+            if (stamp.isEmpty() && head.updatedAt.isNotEmpty()) {
+                stamp = head.updatedAt
+                cache.writeBoardStamp(boardId, stamp)
             }
             val localNonEmpty = !activity.isEmpty()
+            var bytes = head.activityBytes
             when (LyreActivitySync.firstOpenPlan(head.activityBytes, localNonEmpty)) {
                 LyreActivityFirstOpen.PUSH_LOCAL -> {
-                    val local = activity.readAll()
-                    api.activityAppend(boardId, local)
+                    api.activityAppend(boardId, activity.readAll())
                     val pulled = api.activity(boardId)
                     activity.replaceFromServer(LyreActivitySync.linesFromJson(pulled))
-                    lastActivityBytes = LyreHead.fromJson(api.head(boardId)).activityBytes
+                    bytes = LyreHead.fromJson(api.head(boardId)).activityBytes
                 }
                 LyreActivityFirstOpen.PULL_SERVER -> {
                     val pulled = api.activity(boardId)
                     activity.replaceFromServer(LyreActivitySync.linesFromJson(pulled))
-                    lastActivityBytes = head.activityBytes
+                    bytes = head.activityBytes
                 }
                 LyreActivityFirstOpen.SEED_LOCAL -> {
-                    activity.seedFromBoardIfEmpty(live, store.projectId)
-                    lastActivityBytes = 0L
+                    activity.seedFromBoardIfEmpty(boardAtOpen, store.projectId)
+                    val seeded = activity.readAll()
+                    if (seeded.isNotEmpty()) {
+                        api.activityAppend(boardId, seeded)
+                        val pulled = api.activity(boardId)
+                        activity.replaceFromServer(LyreActivitySync.linesFromJson(pulled))
+                        bytes = LyreHead.fromJson(api.head(boardId)).activityBytes
+                    } else {
+                        bytes = 0L
+                    }
                 }
             }
+            OpenSync(stamp, bytes)
         }
+        if (sync.stamp.isNotEmpty()) lastSeenUpdatedAt = sync.stamp
+        lastActivityBytes = sync.bytes
         activityTick++
+        pollReady = true
         logActivity("open", "Opened ${live.title.ifBlank { "Untitled" }}")
     }
 
-    LaunchedEffect(boardId, editorResumed) {
+    LaunchedEffect(boardId, editorResumed, pollReady) {
+        if (!pollReady) return@LaunchedEffect
         while (isActive) {
             delay(LyrePoll.INTERVAL_MS)
             if (!editorResumed) continue
@@ -401,28 +449,7 @@ fun LyreEditor(
         if (stills.isEmpty()) return@LaunchedEffect
         val (waved, filled) = withContext(Dispatchers.IO) { LyreWaveformDecoder.fillMissing(live, stills) }
         if (filled <= 0) return@LaunchedEffect
-        live = waved
-        onBoardChange(waved)
-        val wavedResp = withContext(Dispatchers.IO) {
-            val json = LyreBoardCodec.encode(waved)
-            cache.writeBoardJson(boardId, json)
-            api.saveBoard(store.projectId, json, lastSeenUpdatedAt)
-        }
-        when (LyrePoll.onSaveResponse(wavedResp.optBoolean("ok", false), wavedResp.optString("error"))) {
-            LyreSavePoll.SAVED -> {
-                val stamp = wavedResp.optString("updated_at")
-                if (stamp.isNotEmpty()) {
-                    lastSeenUpdatedAt = stamp
-                    withContext(Dispatchers.IO) { cache.writeBoardStamp(boardId, stamp) }
-                }
-            }
-            LyreSavePoll.CONFLICT_RELOAD -> {
-                genStatus = "conflict"
-                reloadFromServer()
-            }
-            LyreSavePoll.KEEP_DIRTY -> Unit
-        }
-        logActivity("cache", "Set $filled waveforms")
+        commit(waved, "Set $filled waveforms", "cache")
     }
 
     fun haltPlayback() {

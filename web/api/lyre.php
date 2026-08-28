@@ -313,32 +313,19 @@ function gos_lyre_pg_insert(PDO $pg, string $id, array $data): void
     }
 }
 
-function gos_lyre_pg_update(PDO $pg, string $id, array $data): void
+/**
+ * Stamp-required wrapper so later PRs cannot LWW-clobber via this name.
+ *
+ * @param array<string, mixed> $data
+ * @return array{updated_at: string}
+ */
+function gos_lyre_pg_update(?PDO $pg, string $id, array $data, string $expectedUpdatedAt = ''): array
 {
-    if (gos_lyre_pg_select($pg, $id) === null) {
-        gos_lyre_fail('not_found', 404);
+    if ($expectedUpdatedAt === '') {
+        gos_lyre_fail('expected_updated_at_required', 400);
     }
-    $title = trim((string) ($data['title'] ?? 'Untitled'));
-    if ($title === '') {
-        $title = 'Untitled';
-    }
-    $brainstorm = (string) ($data['brainstorm'] ?? '');
-    $json = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    if (!is_string($json) || $json === '') {
-        gos_lyre_fail('invalid_board', 400);
-    }
-    try {
-        $st = $pg->prepare(
-            'UPDATE boards
-             SET title = ?, brainstorm = ?, payload = CAST(? AS jsonb), updated_at = NOW()
-             WHERE id = ?'
-        );
-        $st->execute([$title, $brainstorm, $json, $id]);
-    } catch (GosLyreException $e) {
-        throw $e;
-    } catch (Throwable) {
-        gos_lyre_fail('lyre_pg_unavailable', 503);
-    }
+
+    return gos_lyre_pg_update_cas($pg, $id, $data, $expectedUpdatedAt);
 }
 
 function gos_lyre_pg_delete(PDO $pg, string $id): void

@@ -77,6 +77,10 @@ class LyreActivity(private val file: File) {
     fun replaceFromServer(newestFirst: List<LyreActivityLine>) {
         synchronized(lock) {
             file.parentFile?.mkdirs()
+            if (newestFirst.isEmpty()) {
+                file.writeText("", Charsets.UTF_8)
+                return
+            }
             val oldestFirst = newestFirst.asReversed()
             val body = oldestFirst.joinToString(separator = "\n", postfix = "\n") { it.toJson().toString() }
             file.writeText(body, Charsets.UTF_8)
