@@ -8,6 +8,51 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/_common.php';
 
+final class GosLyreException extends RuntimeException
+{
+    public function __construct(
+        public string $error,
+        public int $http = 400,
+        public array $extra = [],
+        string $message = '',
+    ) {
+        parent::__construct($message !== '' ? $message : $error);
+    }
+
+    public function toHttpBody(): array
+    {
+        return ['ok' => false, 'error' => $this->error] + $this->extra;
+    }
+}
+
+function gos_lyre_fail(string $error, int $http = 400, array $extra = []): never
+{
+    throw new GosLyreException($error, $http, $extra);
+}
+
+function gos_lyre_http_status(string $error): int
+{
+    return match ($error) {
+        'auth_required', 'invalid_token' => 401,
+        'not_found' => 404,
+        'not_deletable', 'odysseus_protected' => 403,
+        'db_error' => 500,
+        'lyre_pg_unavailable', 'lyre_unconfigured' => 503,
+        default => 400,
+    };
+}
+
+function gos_lyre_http_send(callable $fn): never
+{
+    try {
+        $out = $fn();
+        $ok = is_array($out) && (($out['ok'] ?? true) !== false);
+        gos_api_json($out, $ok ? 200 : gos_lyre_http_status((string) ($out['error'] ?? 'error')));
+    } catch (GosLyreException $e) {
+        gos_api_json($e->toHttpBody(), $e->http);
+    }
+}
+
 function gos_lyre_pdo_alive(?PDO $pdo): bool
 {
     if (function_exists('gos_pdo_alive')) {
@@ -71,7 +116,7 @@ function gos_lyre_user_id(array $access): int
 {
     $id = (int) ($access['user']['id'] ?? 0);
     if ($id <= 0) {
-        gos_api_json(['ok' => false, 'error' => 'auth_required'], 401);
+        gos_lyre_fail('auth_required', 401);
     }
     return $id;
 }
@@ -79,18 +124,29 @@ function gos_lyre_user_id(array $access): int
 function gos_lyre_mysql(): PDO
 {
     if (!gos_table_exists('lyre_projects')) {
-        gos_api_json(['ok' => false, 'error' => 'lyre_unconfigured'], 503);
+        gos_lyre_fail('lyre_unconfigured', 503);
     }
     return gos_pdo();
 }
 
 function gos_lyre_pg(): PDO
 {
+    if (getenv('GOS_LYRE_TEST_PG_FAIL') === '1') {
+        gos_lyre_fail('lyre_pg_unavailable', 503);
+    }
     try {
         return gos_lyre_pdo();
+    } catch (GosLyreException $e) {
+        throw $e;
     } catch (Throwable) {
-        gos_api_json(['ok' => false, 'error' => 'lyre_pg_unavailable'], 503);
+        gos_lyre_fail('lyre_pg_unavailable', 503);
     }
+}
+
+function gos_lyre_is_odysseus_project(array $row): bool
+{
+    return ((int) ($row['is_odysseus'] ?? 0)) === 1
+        || (string) ($row['board_id'] ?? '') === gos_lyre_odysseus_board_id();
 }
 
 /** @return array<string, mixed> */
@@ -225,8 +281,10 @@ function gos_lyre_pg_select(PDO $pg, string $id): ?array
         $st->execute([$id]);
         $row = $st->fetch();
         return is_array($row) ? $row : null;
+    } catch (GosLyreException $e) {
+        throw $e;
     } catch (Throwable) {
-        gos_api_json(['ok' => false, 'error' => 'lyre_pg_unavailable'], 503);
+        gos_lyre_fail('lyre_pg_unavailable', 503);
     }
 }
 
@@ -239,7 +297,7 @@ function gos_lyre_pg_insert(PDO $pg, string $id, array $data): void
     $brainstorm = (string) ($data['brainstorm'] ?? '');
     $json = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     if (!is_string($json) || $json === '') {
-        gos_api_json(['ok' => false, 'error' => 'invalid_board'], 400);
+        gos_lyre_fail('invalid_board', 400);
     }
     try {
         $st = $pg->prepare(
@@ -247,15 +305,17 @@ function gos_lyre_pg_insert(PDO $pg, string $id, array $data): void
              VALUES (?, ?, ?, CAST(? AS jsonb), NOW())'
         );
         $st->execute([$id, $title, $brainstorm, $json]);
+    } catch (GosLyreException $e) {
+        throw $e;
     } catch (Throwable) {
-        gos_api_json(['ok' => false, 'error' => 'lyre_pg_unavailable'], 503);
+        gos_lyre_fail('lyre_pg_unavailable', 503);
     }
 }
 
 function gos_lyre_pg_update(PDO $pg, string $id, array $data): void
 {
     if (gos_lyre_pg_select($pg, $id) === null) {
-        gos_api_json(['ok' => false, 'error' => 'not_found'], 404);
+        gos_lyre_fail('not_found', 404);
     }
     $title = trim((string) ($data['title'] ?? 'Untitled'));
     if ($title === '') {
@@ -264,7 +324,7 @@ function gos_lyre_pg_update(PDO $pg, string $id, array $data): void
     $brainstorm = (string) ($data['brainstorm'] ?? '');
     $json = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     if (!is_string($json) || $json === '') {
-        gos_api_json(['ok' => false, 'error' => 'invalid_board'], 400);
+        gos_lyre_fail('invalid_board', 400);
     }
     try {
         $st = $pg->prepare(
@@ -273,8 +333,10 @@ function gos_lyre_pg_update(PDO $pg, string $id, array $data): void
              WHERE id = ?'
         );
         $st->execute([$title, $brainstorm, $json, $id]);
+    } catch (GosLyreException $e) {
+        throw $e;
     } catch (Throwable) {
-        gos_api_json(['ok' => false, 'error' => 'lyre_pg_unavailable'], 503);
+        gos_lyre_fail('lyre_pg_unavailable', 503);
     }
 }
 
@@ -283,8 +345,10 @@ function gos_lyre_pg_delete(PDO $pg, string $id): void
     try {
         $st = $pg->prepare('DELETE FROM boards WHERE id = ?');
         $st->execute([$id]);
+    } catch (GosLyreException $e) {
+        throw $e;
     } catch (Throwable) {
-        gos_api_json(['ok' => false, 'error' => 'lyre_pg_unavailable'], 503);
+        gos_lyre_fail('lyre_pg_unavailable', 503);
     }
 }
 
@@ -302,7 +366,7 @@ function gos_lyre_ensure_odysseus(int $userId): void
             $ins->execute([gos_lyre_new_hex_id(), $userId, 'Odysseus', 'private', $boardId]);
         } catch (PDOException) {
             if (gos_lyre_project_by_board($mysql, $userId, $boardId) === null) {
-                gos_api_json(['ok' => false, 'error' => 'db_error'], 500);
+                gos_lyre_fail('db_error', 500);
             }
         }
     }
@@ -556,13 +620,13 @@ function gos_lyre_storage_get(string $rawKey): never
     gos_lyre_json_error('storage_get_failed', $status >= 400 ? $status : 502);
 }
 
-function gos_lyre_get_projects(array $access): never
+function gos_lyre_list_projects(array $access): array
 {
     $userId = gos_lyre_user_id($access);
     gos_lyre_ensure_odysseus($userId);
     $mysql = gos_lyre_mysql();
     $st = $mysql->prepare(
-        'SELECT * FROM lyre_projects WHERE user_id = ? ORDER BY is_odysseus DESC, updated_at DESC'
+        'SELECT * FROM lyre_projects WHERE user_id = ? ORDER BY updated_at DESC, id DESC'
     );
     $st->execute([$userId]);
     $projects = [];
@@ -571,55 +635,81 @@ function gos_lyre_get_projects(array $access): never
             $projects[] = gos_lyre_project_public($row);
         }
     }
-    gos_api_json(['ok' => true, 'projects' => $projects]);
+    $state = function_exists('gos_lyre_mcp_user_state') ? gos_lyre_mcp_user_state($userId) : [];
+    return [
+        'ok' => true,
+        'projects' => $projects,
+        'phone_last_project_id' => $state['phone_last_project_id'] ?? null,
+        'mcp_open_project_id' => $state['mcp_open_project_id'] ?? null,
+    ];
 }
 
-function gos_lyre_get_project(array $access, string $id): never
+function gos_lyre_get_projects(array $access): never
+{
+    gos_lyre_http_send(fn () => gos_lyre_list_projects($access));
+}
+
+function gos_lyre_load_project(array $access, string $id): array
 {
     $id = trim($id);
     if ($id === '') {
-        gos_api_json(['ok' => false, 'error' => 'id_required'], 400);
+        gos_lyre_fail('id_required', 400);
     }
     $userId = gos_lyre_user_id($access);
     $row = gos_lyre_project_by_id(gos_lyre_mysql(), $userId, $id);
     if ($row === null) {
-        gos_api_json(['ok' => false, 'error' => 'not_found'], 404);
+        gos_lyre_fail('not_found', 404);
     }
-    gos_api_json(['ok' => true, 'project' => gos_lyre_project_public($row)]);
+    return ['ok' => true, 'project' => gos_lyre_project_public($row)];
 }
 
-function gos_lyre_get_board(array $access, string $boardId): never
+function gos_lyre_get_project(array $access, string $id): never
+{
+    gos_lyre_http_send(fn () => gos_lyre_load_project($access, $id));
+}
+
+function gos_lyre_load_board(array $access, string $boardId): array
 {
     $boardId = trim($boardId);
     if ($boardId === '') {
-        gos_api_json(['ok' => false, 'error' => 'board_id_required'], 400);
+        gos_lyre_fail('board_id_required', 400);
     }
     $userId = gos_lyre_user_id($access);
     $proj = gos_lyre_project_by_board(gos_lyre_mysql(), $userId, $boardId);
     if ($proj === null) {
-        gos_api_json(['ok' => false, 'error' => 'not_found'], 404);
+        gos_lyre_fail('not_found', 404);
     }
     $row = gos_lyre_pg_select(gos_lyre_pg(), $boardId);
     if ($row === null) {
-        gos_api_json(['ok' => false, 'error' => 'not_found'], 404);
+        gos_lyre_fail('not_found', 404);
     }
     $data = gos_lyre_payload_array($row['payload'] ?? null);
-    gos_api_json([
+    return [
         'ok' => true,
         'board_id' => (string) $row['id'],
         'data' => $data === [] ? new stdClass() : $data,
         'updated_at' => (string) ($row['updated_at'] ?? ''),
-    ]);
+    ];
 }
 
-function gos_lyre_post_create(array $access, array $body): never
+function gos_lyre_get_board(array $access, string $boardId): never
+{
+    gos_lyre_http_send(fn () => gos_lyre_load_board($access, $boardId));
+}
+
+function gos_lyre_create_project(array $access, array $body): array
 {
     $userId = gos_lyre_user_id($access);
     $name = gos_lyre_project_name((string) ($body['name'] ?? ''));
+    $brainstorm = $body['brainstorm'] ?? '';
+    if (!is_string($brainstorm)) {
+        $brainstorm = '';
+    }
     $boardId = 'lyre_phone_' . gos_lyre_uuid();
     $projectId = gos_lyre_new_hex_id();
     $empty = gos_lyre_empty_board();
     $empty['title'] = $name;
+    $empty['brainstorm'] = $brainstorm;
     $pg = gos_lyre_pg();
     gos_lyre_pg_insert($pg, $boardId, $empty);
     try {
@@ -628,29 +718,131 @@ function gos_lyre_post_create(array $access, array $body): never
              VALUES (?, ?, ?, ?, ?, NULL, 0)'
         );
         $ins->execute([$projectId, $userId, $name, 'private', $boardId]);
+    } catch (GosLyreException $e) {
+        gos_lyre_pg_delete($pg, $boardId);
+        throw $e;
     } catch (Throwable) {
         gos_lyre_pg_delete($pg, $boardId);
-        gos_api_json(['ok' => false, 'error' => 'db_error'], 500);
+        gos_lyre_fail('db_error', 500);
     }
     $row = gos_lyre_project_by_id(gos_lyre_mysql(), $userId, $projectId);
     if ($row === null) {
-        gos_api_json(['ok' => false, 'error' => 'db_error'], 500);
+        gos_lyre_fail('db_error', 500);
     }
-    gos_api_json(['ok' => true, 'project' => gos_lyre_project_public($row)]);
+    return ['ok' => true, 'project' => gos_lyre_project_public($row)];
+}
+
+function gos_lyre_post_create(array $access, array $body): never
+{
+    gos_lyre_http_send(fn () => gos_lyre_create_project($access, $body));
+}
+
+function gos_lyre_resolve_project_row(array $access, array $body): array
+{
+    $userId = gos_lyre_user_id($access);
+    $projectId = trim((string) ($body['project_id'] ?? $body['id'] ?? ''));
+    $boardId = trim((string) ($body['board_id'] ?? ''));
+    $mysql = gos_lyre_mysql();
+    $row = null;
+    if ($projectId !== '') {
+        $row = gos_lyre_project_by_id($mysql, $userId, $projectId);
+    }
+    if ($row === null && $boardId !== '') {
+        $row = gos_lyre_project_by_board($mysql, $userId, $boardId);
+    }
+    if ($row === null) {
+        gos_lyre_fail($projectId === '' && $boardId === '' ? 'project_required' : 'not_found', $projectId === '' && $boardId === '' ? 400 : 404);
+    }
+    return $row;
+}
+
+function gos_lyre_open_resolved(array $access, array $row, string $slot): array
+{
+    $userId = gos_lyre_user_id($access);
+    if ($slot === 'mcp' && gos_lyre_is_odysseus_project($row)) {
+        gos_lyre_fail('odysseus_protected', 403);
+    }
+    if (function_exists('gos_lyre_mcp_persist_open')) {
+        gos_lyre_mcp_persist_open($userId, $row, $slot);
+    }
+    return ['ok' => true, 'project' => gos_lyre_project_public($row)];
+}
+
+function gos_lyre_open_project(array $access, array $body, string $slot): array
+{
+    $row = gos_lyre_resolve_project_row($access, $body);
+    return gos_lyre_open_resolved($access, $row, $slot);
+}
+
+function gos_lyre_http_open(array $access, array $body): never
+{
+    gos_lyre_http_send(fn () => gos_lyre_open_project($access, $body, 'phone'));
+}
+
+function gos_lyre_http_mcp_status(array $access): never
+{
+    gos_lyre_http_send(function () use ($access) {
+        return gos_lyre_mcp_status_payload(gos_lyre_user_id($access), null);
+    });
+}
+
+function gos_lyre_http_mcp_ensure(array $access): never
+{
+    gos_lyre_http_send(function () use ($access) {
+        $userId = gos_lyre_user_id($access);
+        $ens = gos_lyre_mcp_ensure_for_user($userId, false);
+        $out = gos_lyre_mcp_status_payload($userId, $ens['plain_token']);
+        if (is_string($ens['plain_token']) && $ens['plain_token'] !== '') {
+            $out['plain_token'] = $ens['plain_token'];
+        }
+        return $out;
+    });
+}
+
+function gos_lyre_http_mcp_rotate(array $access, array $body): never
+{
+    gos_lyre_http_send(function () use ($access, $body) {
+        if (!filter_var($body['confirm'] ?? false, FILTER_VALIDATE_BOOLEAN)) {
+            gos_lyre_fail('confirm_required', 400);
+        }
+        $userId = gos_lyre_user_id($access);
+        $ens = gos_lyre_mcp_ensure_for_user($userId, true);
+        $out = gos_lyre_mcp_status_payload($userId, $ens['plain_token']);
+        $out['plain_token'] = $ens['plain_token'];
+        return $out;
+    });
+}
+
+function gos_lyre_http_mcp_disable(array $access): never
+{
+    gos_lyre_http_send(function () use ($access) {
+        $userId = gos_lyre_user_id($access);
+        gos_lyre_mcp_disable_for_user($userId);
+        return gos_lyre_mcp_status_payload($userId, null);
+    });
+}
+
+function gos_lyre_http_mcp_enable(array $access): never
+{
+    gos_lyre_http_send(function () use ($access) {
+        $userId = gos_lyre_user_id($access);
+        gos_lyre_mcp_enable_for_user($userId);
+        return gos_lyre_mcp_status_payload($userId, null);
+    });
 }
 
 function gos_lyre_post_rename(array $access, array $body): never
 {
     $id = trim((string) ($body['id'] ?? ''));
     if ($id === '') {
-        gos_api_json(['ok' => false, 'error' => 'id_required'], 400);
+        gos_lyre_fail('id_required', 400);
     }
     $name = gos_lyre_project_name((string) ($body['name'] ?? ''));
     $userId = gos_lyre_user_id($access);
     $mysql = gos_lyre_mysql();
     $row = gos_lyre_project_by_id($mysql, $userId, $id);
     if ($row === null) {
-        gos_api_json(['ok' => false, 'error' => 'not_found'], 404);
+        gos_lyre_fail('not_found', 404);
     }
     $st = $mysql->prepare('UPDATE lyre_projects SET name = ? WHERE id = ? AND user_id = ?');
     $st->execute([$name, $id, $userId]);
@@ -662,18 +854,18 @@ function gos_lyre_post_delete(array $access, array $body): never
 {
     $id = trim((string) ($body['id'] ?? ''));
     if ($id === '') {
-        gos_api_json(['ok' => false, 'error' => 'id_required'], 400);
+        gos_lyre_fail('id_required', 400);
     }
     $userId = gos_lyre_user_id($access);
     $mysql = gos_lyre_mysql();
     $row = gos_lyre_project_by_id($mysql, $userId, $id);
     if ($row === null) {
-        gos_api_json(['ok' => false, 'error' => 'not_found'], 404);
+        gos_lyre_fail('not_found', 404);
     }
     $boardId = (string) $row['board_id'];
     $odysseus = gos_lyre_odysseus_board_id();
     if (((int) ($row['is_odysseus'] ?? 0)) === 1 || $boardId === $odysseus || !str_starts_with($boardId, 'lyre_phone_')) {
-        gos_api_json(['ok' => false, 'error' => 'not_deletable'], 403);
+        gos_lyre_fail('not_deletable', 403);
     }
     gos_lyre_pg_delete(gos_lyre_pg(), $boardId);
     $del = $mysql->prepare('DELETE FROM lyre_projects WHERE id = ? AND user_id = ?');
@@ -698,14 +890,14 @@ function gos_lyre_post_save_board(array $access, array $body): never
         $row = gos_lyre_project_by_board($mysql, $userId, $boardId);
     }
     if ($row === null) {
-        gos_api_json(['ok' => false, 'error' => 'not_found'], 404);
+        gos_lyre_fail('not_found', 404);
     }
     $data = $body['data'] ?? null;
     if (is_string($data) && $data !== '') {
         $data = json_decode($data, true);
     }
     if (!is_array($data)) {
-        gos_api_json(['ok' => false, 'error' => 'data_required'], 400);
+        gos_lyre_fail('data_required', 400);
     }
     $target = (string) $row['board_id'];
     gos_lyre_pg_update(gos_lyre_pg(), $target, $data);
@@ -1459,64 +1651,98 @@ function gos_lyre_get_imagine_status(string $requestId): never
     gos_api_json(['ok' => true, 'status' => 'pending', 'request_id' => $requestId, 'kind' => 'video']);
 }
 
+require_once dirname(__DIR__) . '/includes/lyre_mcp.php';
+
 if (defined('GOS_LYRE_NO_ROUTE') && GOS_LYRE_NO_ROUTE) {
     return;
 }
 
-$httpMethod = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
-$qsAction = strtolower(trim((string) ($_GET['action'] ?? '')));
+try {
+    $httpMethod = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
+    $qsAction = strtolower(trim((string) ($_GET['action'] ?? '')));
 
-if ($httpMethod === 'GET' && $qsAction === 'storage_get') {
-    gos_lyre_auth();
-    gos_lyre_storage_get((string) ($_GET['key'] ?? ''));
-}
-if ($httpMethod === 'POST' && $qsAction === 'storage_put') {
-    gos_lyre_auth();
-    gos_lyre_storage_put_request();
-}
-if ($httpMethod === 'GET') {
+    if ($httpMethod === 'GET' && $qsAction === 'storage_get') {
+        gos_lyre_auth();
+        gos_lyre_storage_get((string) ($_GET['key'] ?? ''));
+    }
+    if ($httpMethod === 'POST' && $qsAction === 'storage_put') {
+        gos_lyre_auth();
+        gos_lyre_storage_put_request();
+    }
+    if ($httpMethod === 'GET') {
+        $access = gos_lyre_auth();
+        $action = $qsAction !== '' ? $qsAction : 'projects';
+        if ($action === 'projects') {
+            gos_lyre_get_projects($access);
+        }
+        if ($action === 'project') {
+            gos_lyre_get_project($access, (string) ($_GET['id'] ?? ''));
+        }
+        if ($action === 'board') {
+            gos_lyre_get_board($access, (string) ($_GET['board_id'] ?? $_GET['id'] ?? ''));
+        }
+        if ($action === 'open') {
+            gos_lyre_http_open($access, [
+                'id' => (string) ($_GET['id'] ?? $_GET['project_id'] ?? ''),
+                'project_id' => (string) ($_GET['project_id'] ?? $_GET['id'] ?? ''),
+                'board_id' => (string) ($_GET['board_id'] ?? ''),
+            ]);
+        }
+        if ($action === 'mcp_status') {
+            gos_lyre_http_mcp_status($access);
+        }
+        if ($action === 'imagine_status') {
+            gos_lyre_get_imagine_status((string) ($_GET['request_id'] ?? $_GET['id'] ?? ''));
+        }
+        gos_api_json(['ok' => false, 'error' => 'unknown_action'], 404);
+    }
+    if ($httpMethod !== 'POST') {
+        gos_api_json(['ok' => false, 'error' => 'method_not_allowed'], 405);
+    }
+
     $access = gos_lyre_auth();
-    $action = $qsAction !== '' ? $qsAction : 'projects';
-    if ($action === 'projects') {
-        gos_lyre_get_projects($access);
+    $body = gos_json_body();
+    $action = strtolower(trim((string) ($body['action'] ?? '')));
+    if ($action === 'create') {
+        gos_lyre_post_create($access, $body);
     }
-    if ($action === 'project') {
-        gos_lyre_get_project($access, (string) ($_GET['id'] ?? ''));
+    if ($action === 'rename') {
+        gos_lyre_post_rename($access, $body);
     }
-    if ($action === 'board') {
-        gos_lyre_get_board($access, (string) ($_GET['board_id'] ?? $_GET['id'] ?? ''));
+    if ($action === 'delete') {
+        gos_lyre_post_delete($access, $body);
     }
-    if ($action === 'imagine_status') {
-        gos_lyre_get_imagine_status((string) ($_GET['request_id'] ?? $_GET['id'] ?? ''));
+    if ($action === 'save_board') {
+        gos_lyre_post_save_board($access, $body);
     }
-    gos_api_json(['ok' => false, 'error' => 'unknown_action'], 404);
+    if ($action === 'open') {
+        gos_lyre_http_open($access, $body);
+    }
+    if ($action === 'mcp_status') {
+        gos_lyre_http_mcp_status($access);
+    }
+    if ($action === 'mcp_ensure') {
+        gos_lyre_http_mcp_ensure($access);
+    }
+    if ($action === 'mcp_rotate') {
+        gos_lyre_http_mcp_rotate($access, $body);
+    }
+    if ($action === 'mcp_disable') {
+        gos_lyre_http_mcp_disable($access);
+    }
+    if ($action === 'mcp_enable') {
+        gos_lyre_http_mcp_enable($access);
+    }
+    if ($action === 'storage_put') {
+        gos_lyre_storage_put_json($body);
+    }
+    if ($action === 'imagine_still') {
+        gos_lyre_post_imagine_still($body);
+    }
+    if ($action === 'imagine_video') {
+        gos_lyre_post_imagine_video($body);
+    }
+    gos_api_json(['ok' => false, 'error' => 'unknown_action'], 400);
+} catch (GosLyreException $e) {
+    gos_api_json($e->toHttpBody(), $e->http);
 }
-if ($httpMethod !== 'POST') {
-    gos_api_json(['ok' => false, 'error' => 'method_not_allowed'], 405);
-}
-
-$access = gos_lyre_auth();
-$body = gos_json_body();
-$action = strtolower(trim((string) ($body['action'] ?? '')));
-if ($action === 'create') {
-    gos_lyre_post_create($access, $body);
-}
-if ($action === 'rename') {
-    gos_lyre_post_rename($access, $body);
-}
-if ($action === 'delete') {
-    gos_lyre_post_delete($access, $body);
-}
-if ($action === 'save_board') {
-    gos_lyre_post_save_board($access, $body);
-}
-if ($action === 'storage_put') {
-    gos_lyre_storage_put_json($body);
-}
-if ($action === 'imagine_still') {
-    gos_lyre_post_imagine_still($body);
-}
-if ($action === 'imagine_video') {
-    gos_lyre_post_imagine_video($body);
-}
-gos_api_json(['ok' => false, 'error' => 'unknown_action'], 400);

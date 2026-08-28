@@ -73,6 +73,7 @@ import io.grokify.os.apps.lyre.LyrePlayItem
 import io.grokify.os.apps.lyre.LyrePlayer
 import io.grokify.os.apps.lyre.LyrePreview
 import io.grokify.os.apps.lyre.LyreStorageKeys
+import io.grokify.os.apps.lyre.LyreProject
 import io.grokify.os.apps.lyre.LyreStore
 import io.grokify.os.apps.lyre.LyreTransport
 import io.grokify.os.apps.lyre.LyreUploads
@@ -95,6 +96,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
 private val CHIPS = listOf(
     "scenes" to "Scenes",
@@ -116,11 +118,13 @@ private sealed class TrackMenu {
 fun LyreEditor(
     board: BoardData,
     boardId: String,
+    project: LyreProject,
     cache: LyreCache,
     store: LyreStore,
     api: LyreApi,
     onBack: () -> Unit,
     onBoardChange: (BoardData) -> Unit = {},
+    onProjectOpened: (LyreProject, BoardData) -> Unit = { _, _ -> },
 ) {
     val context = LocalContext.current
     val player = remember { LyrePlayer(context.applicationContext) }
@@ -976,7 +980,7 @@ fun LyreEditor(
                 )
             }
             Text(
-                live.title.ifBlank { "Untitled" },
+                project.name.ifBlank { live.title.ifBlank { "Untitled" } },
                 color = GrokifyColors.TextPrimary,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 16.sp,
@@ -1386,15 +1390,39 @@ fun LyreEditor(
         )
     }
 
+    fun openProject(next: LyreProject) {
+        if (next.id == project.id) {
+            switcher = false
+            return
+        }
+        scope.launch {
+            saveJob?.join()
+            val json = withContext(Dispatchers.IO) {
+                api.open(next.id)
+                api.board(next.boardId)
+            }
+            if (!json.optBoolean("ok", false)) {
+                genStatus = json.optString("error").ifBlank { "open_failed" }
+                return@launch
+            }
+            val data = json.optJSONObject("data") ?: JSONObject()
+            withContext(Dispatchers.IO) { cache.writeBoardJson(next.boardId, data) }
+            store.projectId = next.id
+            switcher = false
+            onProjectOpened(next, LyreBoardCodec.decode(data))
+        }
+    }
+
     if (switcher) {
-        AlertDialog(
-            onDismissRequest = { switcher = false },
-            title = { Text("Projects") },
-            text = {
-                Text("${live.title.ifBlank { "Untitled" }}\nShared with desktop LYRE")
-            },
-            confirmButton = {
-                TextButton(onClick = { switcher = false }) { Text("Close") }
+        LyreProjectPicker(
+            visible = true,
+            current = project,
+            api = api,
+            onDismiss = { switcher = false },
+            onOpen = { openProject(it) },
+            onCreated = { created ->
+                val row = created
+                openProject(row)
             },
         )
     }

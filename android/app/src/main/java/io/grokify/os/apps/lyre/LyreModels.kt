@@ -250,6 +250,19 @@ fun lyreProjectsFromJson(obj: JSONObject): List<LyreProject> {
     return out
 }
 
+/**
+ * Restore the last phone project if it is still listed.
+ * Missing/stale prefs load Odysseus. Never auto-pick a lyre_phone_* row.
+ */
+fun lyreRestoreProject(projects: List<LyreProject>, storedId: String): LyreProject? {
+    val id = storedId.trim()
+    if (id.isNotEmpty()) {
+        val hit = projects.firstOrNull { it.id == id }
+        if (hit != null) return hit
+    }
+    return projects.firstOrNull { it.isOdysseus || it.boardId == "lyre" }
+}
+
 internal fun jsonTruthy(obj: JSONObject, key: String): Boolean {
     if (!obj.has(key) || obj.isNull(key)) return false
     return when (val v = obj.get(key)) {

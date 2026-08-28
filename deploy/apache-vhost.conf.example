@@ -69,5 +69,10 @@
     </Directory>
 
     ErrorLog ${APACHE_LOG_DIR}/your.domain.example_error.log
-    CustomLog ${APACHE_LOG_DIR}/your.domain.example_access.log combined
+    # Do not write MCP tokens (path secret) to combined. REPLACES the
+    # unconditional CustomLog … combined line — do not leave both.
+    LogFormat "%h %l %u %t \"MCP /mcp/[redacted] %H\" %>s %b \"%{Referer}i\" \"%{User-Agent}i\"" lyre_mcp_redacted
+    SetEnvIf Request_URI "^/mcp" lyre_mcp_req
+    CustomLog ${APACHE_LOG_DIR}/your.domain.example_access.log lyre_mcp_redacted env=lyre_mcp_req
+    CustomLog ${APACHE_LOG_DIR}/your.domain.example_access.log combined env=!lyre_mcp_req
 </VirtualHost>

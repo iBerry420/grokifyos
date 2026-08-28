@@ -29,8 +29,25 @@ class LyreApi(private val tokenProvider: () -> String?) {
 
     fun project(id: String): JSONObject = get("project&id=" + enc(id))
 
-    fun create(name: String): JSONObject =
-        post(JSONObject().put("action", "create").put("name", name))
+    fun create(name: String, brainstorm: String? = null): JSONObject {
+        val body = JSONObject().put("action", "create").put("name", name)
+        if (!brainstorm.isNullOrBlank()) body.put("brainstorm", brainstorm)
+        return post(body)
+    }
+
+    fun open(projectId: String): JSONObject =
+        post(JSONObject().put("action", "open").put("id", projectId))
+
+    fun mcpStatus(): JSONObject = get("mcp_status")
+
+    fun mcpEnsure(): JSONObject = post(JSONObject().put("action", "mcp_ensure"))
+
+    fun mcpRotate(): JSONObject =
+        post(JSONObject().put("action", "mcp_rotate").put("confirm", true))
+
+    fun mcpEnable(): JSONObject = post(JSONObject().put("action", "mcp_enable"))
+
+    fun mcpDisable(): JSONObject = post(JSONObject().put("action", "mcp_disable"))
 
     fun rename(id: String, name: String): JSONObject =
         post(JSONObject().put("action", "rename").put("id", id).put("name", name))

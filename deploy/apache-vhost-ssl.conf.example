@@ -66,6 +66,16 @@
     </Directory>
 
 
+    # Tokenized LYRE MCP (token lives in the path; do not proxy).
+    # vhost-level: /mcp is NOT inside <Directory /api>
+    # (that Directory RewriteEngine stays for Authorization forwarding only).
+    # [PT] is mandatory: substitution is Alias /api (URL-path), not DocumentRoot.
+    # CexBot’s [QSA,L] to /mcp.php is a different mapping — do not copy those flags.
+    RewriteEngine On
+    RewriteCond %{HTTP:Authorization} .
+    RewriteRule ^ - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+    RewriteRule ^/mcp(?:\.php)?(/.*)?$ /api/lyre-mcp.php [PT,QSA,L]
+
     # Agent WebSocket (dedicated bridge preferred on 8876; temporarily may share gateway)
     ProxyPreserveHost On
     ProxyPass /grokify-ws/ ws://127.0.0.1:8876/
@@ -82,7 +92,12 @@
     </IfModule>
 
     ErrorLog ${APACHE_LOG_DIR}/your.domain.example_error.log
-    CustomLog ${APACHE_LOG_DIR}/your.domain.example_access.log combined
+    # Do not write MCP tokens (path secret) to combined. REPLACES the
+    # unconditional CustomLog … combined line — do not leave both.
+    LogFormat "%h %l %u %t \"MCP /mcp/[redacted] %H\" %>s %b \"%{Referer}i\" \"%{User-Agent}i\"" lyre_mcp_redacted
+    SetEnvIf Request_URI "^/mcp" lyre_mcp_req
+    CustomLog ${APACHE_LOG_DIR}/your.domain.example_access.log lyre_mcp_redacted env=lyre_mcp_req
+    CustomLog ${APACHE_LOG_DIR}/your.domain.example_access.log combined env=!lyre_mcp_req
 
 SSLCertificateFile /etc/letsencrypt/live/YOUR_DOMAIN/fullchain.pem
 SSLCertificateKeyFile /etc/letsencrypt/live/YOUR_DOMAIN/privkey.pem

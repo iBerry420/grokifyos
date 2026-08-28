@@ -10,6 +10,11 @@ declare(strict_types=1);
 $uri = urldecode(parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/');
 $root = dirname(__DIR__) . '/web';
 
+if (preg_match('#^/mcp(?:\.php)?(/|$)#', $uri) === 1) {
+    require $root . '/api/lyre-mcp.php';
+    return true;
+}
+
 if (str_starts_with($uri, '/api/')) {
     $file = $root . $uri;
     if (is_file($file)) {

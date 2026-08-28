@@ -18,6 +18,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -63,6 +64,7 @@ fun LyrePane(
     var error by remember { mutableStateOf<String?>(null) }
     var board by remember { mutableStateOf<BoardData?>(null) }
     var boardId by remember { mutableStateOf<String?>(null) }
+    var project by remember { mutableStateOf<LyreProject?>(null) }
 
     BackHandler(onBack = onBack)
     LaunchedEffect(Unit) {
@@ -76,29 +78,32 @@ fun LyrePane(
                     )
                 }
                 val projects = lyreProjectsFromJson(projectsJson)
-                val odysseus = projects.firstOrNull { it.isOdysseus || it.boardId == "lyre" }
+                val picked = lyreRestoreProject(projects, store.projectId)
                     ?: return@runCatching LoadResult(error = "not_found")
-                store.projectId = odysseus.id
-                val boardJson = api.board(odysseus.boardId)
+                store.projectId = picked.id
+                runCatching { api.open(picked.id) }
+                val boardJson = api.board(picked.boardId)
                 if (!boardJson.optBoolean("ok", false)) {
                     return@runCatching LoadResult(
                         error = boardJson.optString("error").ifBlank { "request_failed" },
                     )
                 }
                 val data = boardJson.optJSONObject("data") ?: JSONObject()
-                cache.writeBoardJson(odysseus.boardId, data)
+                cache.writeBoardJson(picked.boardId, data)
                 val decoded = LyreBoardCodec.decode(data)
-                LoadResult(board = decoded, boardId = odysseus.boardId)
+                LoadResult(board = decoded, boardId = picked.boardId, project = picked)
             }.getOrElse { LoadResult(error = it.message ?: "request_failed") }
         }
         board = result.board
         boardId = result.boardId
+        project = result.project
         error = result.error
         loading = false
     }
 
     val loaded = board
     val loadedId = boardId
+    val loadedProject = project
     when {
         loading -> {
             Column(Modifier.fillMaxSize()) {
@@ -123,16 +128,25 @@ fun LyrePane(
                 )
             }
         }
-        loaded != null && loadedId != null -> {
-            LyreEditor(
-                board = loaded,
-                boardId = loadedId,
-                cache = cache,
-                store = store,
-                api = api,
-                onBack = onBack,
-                onBoardChange = { board = it },
-            )
+        loaded != null && loadedId != null && loadedProject != null -> {
+            key(loadedProject.id) {
+                LyreEditor(
+                    board = loaded,
+                    boardId = loadedId,
+                    project = loadedProject,
+                    cache = cache,
+                    store = store,
+                    api = api,
+                    onBack = onBack,
+                    onBoardChange = { board = it },
+                    onProjectOpened = { p, b ->
+                        store.projectId = p.id
+                        project = p
+                        boardId = p.boardId
+                        board = b
+                    },
+                )
+            }
         }
         else -> {
             Column(Modifier.fillMaxSize()) {
@@ -175,5 +189,6 @@ private fun LyreLoadBar(onBack: () -> Unit) {
 private data class LoadResult(
     val board: BoardData? = null,
     val boardId: String? = null,
+    val project: LyreProject? = null,
     val error: String? = null,
 )
