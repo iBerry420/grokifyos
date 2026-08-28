@@ -57,8 +57,35 @@ class LyreApi(private val tokenProvider: () -> String?) {
 
     fun board(boardId: String): JSONObject = get("board&board_id=" + enc(boardId))
 
-    fun saveBoard(id: String, data: JSONObject): JSONObject =
-        post(JSONObject().put("action", "save_board").put("id", id).put("data", data))
+    fun head(boardId: String): JSONObject = get("head&board_id=" + enc(boardId))
+
+    fun activity(boardId: String, limit: Int = 50, beforeTs: Long? = null): JSONObject {
+        val extra = if (beforeTs != null) "&before_ts=$beforeTs" else ""
+        return get("activity&board_id=" + enc(boardId) + "&limit=$limit$extra")
+    }
+
+    fun activityAppend(boardId: String, lines: List<LyreActivityLine>): JSONObject {
+        val arr = org.json.JSONArray()
+        lines.forEach { arr.put(it.toJson()) }
+        return post(
+            JSONObject()
+                .put("action", "activity_append")
+                .put("board_id", boardId)
+                .put("lines", arr),
+        )
+    }
+
+    fun activityAppend(boardId: String, line: LyreActivityLine): JSONObject =
+        activityAppend(boardId, listOf(line))
+
+    fun saveBoard(id: String, data: JSONObject, expectedUpdatedAt: String): JSONObject =
+        post(
+            JSONObject()
+                .put("action", "save_board")
+                .put("id", id)
+                .put("data", data)
+                .put("expected_updated_at", expectedUpdatedAt),
+        )
 
     fun putStorage(key: String, bytes: ByteArray, mime: String = "application/octet-stream"): JSONObject {
         val url = (BuildConfig.API_BASE.trimEnd('/') + "/lyre.php").toHttpUrlOrNull()

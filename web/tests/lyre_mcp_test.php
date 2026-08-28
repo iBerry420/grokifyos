@@ -315,14 +315,39 @@ foreach ($list['result']['tools'] ?? [] as $t) {
     }
 }
 sort($names);
-expect_eq($names, ['lyre_create', 'lyre_instructions', 'lyre_open', 'lyre_projects'], 'PR 1 tool allowlist');
+expect_eq($names, [
+    'lyre_activity',
+    'lyre_create',
+    'lyre_delete',
+    'lyre_folder',
+    'lyre_instructions',
+    'lyre_move',
+    'lyre_open',
+    'lyre_place',
+    'lyre_projects',
+    'lyre_scene',
+    'lyre_snapshot',
+    'lyre_trim',
+], 'PR 2 tool allowlist');
 expect_true(!in_array('save_board', $names, true), 'save_board absent from tools/list');
+expect_true(in_array('lyre_snapshot', $names, true), 'snapshot tool listed');
+expect_true(in_array('lyre_activity', $names, true), 'activity tool listed');
 
 $unknown = gos_lyre_mcp_run_tool('save_board', ['id' => 'x', 'data' => []], $access);
 expect_eq($unknown['isError'] ?? null, true, 'save_board tool isError');
 $unknownText = (string) ($unknown['content'][0]['text'] ?? '');
 expect_true(str_contains($unknownText, 'unknown_tool'), 'unknown tool is unknown_tool not save_board');
 expect_true(!str_contains($unknownText, 'action'), 'unknown tool body has no action=save_board');
+
+$needId = gos_lyre_mcp_run_tool('lyre_folder', ['path' => 'Library'], $access);
+expect_eq($needId['isError'] ?? null, true, 'mutating tool without board_id isError');
+$needText = (string) ($needId['content'][0]['text'] ?? '');
+expect_true(str_contains($needText, 'project_required'), 'mutating tool without board_id is project_required');
+
+$odMut = gos_lyre_mcp_run_tool('lyre_folder', ['board_id' => 'lyre', 'path' => 'Library'], $access);
+expect_eq($odMut['isError'] ?? null, true, 'Odysseus mutate isError');
+$odText = (string) ($odMut['content'][0]['text'] ?? '');
+expect_true(str_contains($odText, 'odysseus_protected'), 'Odysseus mutate is odysseus_protected');
 
 $bogus = gos_lyre_mcp_run_tool('not_a_tool', [], $access);
 expect_true(str_contains((string) ($bogus['content'][0]['text'] ?? ''), 'unknown_tool'), 'unknown tool name');

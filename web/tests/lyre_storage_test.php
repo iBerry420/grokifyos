@@ -75,6 +75,12 @@ expect_eq($refv['resolution'] ?? '', '720p', 'ref-to-video caps 720p');
 $edv = gos_lyre_video_payload('fix', [], [], 6, '16:9', '720p', 'data:video/mp4;base64,xx', 'edit');
 expect_eq(isset($edv['video']), true, 'edit video field');
 expect_eq(isset($edv['duration']), false, 'edit inherits duration');
+expect_eq(gos_lyre_safe_board_id('lyre_phone_abc-def'), 'lyre_phone_abc-def', 'safe board hyphens');
+expect_eq(gos_lyre_safe_board_id('lyre'), 'lyre', 'safe odysseus id');
+expect_eq(gos_lyre_safe_board_id(''), null, 'safe empty');
+expect_eq(gos_lyre_safe_board_id('../'), null, 'safe rejects ../');
+expect_eq(gos_lyre_safe_board_id('..'), null, 'safe rejects ..');
+expect_eq(gos_lyre_safe_board_id('foo/../bar'), null, 'safe rejects nested traversal');
 
 if ($fails > 0) {
     fwrite(STDERR, "{$fails} failed\n");

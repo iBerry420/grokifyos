@@ -54,6 +54,16 @@ class LyreCache(
         File(boardDir(boardId), "board.json").writeText(data.toString())
     }
 
+    fun writeBoardStamp(boardId: String, updatedAt: String) {
+        File(boardDir(boardId), "updated_at").writeText(updatedAt)
+    }
+
+    fun readBoardStamp(boardId: String): String? {
+        val f = File(boardDir(boardId), "updated_at")
+        if (!f.isFile || f.length() <= 0L) return null
+        return f.readText().trim().takeIf { it.isNotEmpty() }
+    }
+
     fun readBoardJson(boardId: String): JSONObject? {
         val f = File(boardDir(boardId), "board.json")
         if (!f.isFile || f.length() <= 0L) return null

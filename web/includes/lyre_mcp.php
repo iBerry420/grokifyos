@@ -18,6 +18,14 @@ const GOS_LYRE_MCP_TOOL_ALLOWLIST = [
     'lyre_projects',
     'lyre_create',
     'lyre_open',
+    'lyre_snapshot',
+    'lyre_folder',
+    'lyre_scene',
+    'lyre_place',
+    'lyre_trim',
+    'lyre_move',
+    'lyre_delete',
+    'lyre_activity',
 ];
 
 /** @var list<string> */
@@ -628,6 +636,137 @@ function gos_lyre_mcp_tool_definitions(): array
                 'additionalProperties' => false,
             ],
         ],
+        [
+            'name' => 'lyre_snapshot',
+            'description' => 'Compact board snapshot (not raw payload). Pass board_id or project_id. Odysseus allowed when explicit.',
+            'inputSchema' => [
+                'type' => 'object',
+                'properties' => [
+                    'project_id' => ['type' => 'string'],
+                    'board_id' => ['type' => 'string'],
+                ],
+                'additionalProperties' => false,
+            ],
+        ],
+        [
+            'name' => 'lyre_folder',
+            'description' => 'Ensure a library folder path (flat name string). Requires board_id or project_id. Odysseus refused.',
+            'inputSchema' => [
+                'type' => 'object',
+                'properties' => [
+                    'project_id' => ['type' => 'string'],
+                    'board_id' => ['type' => 'string'],
+                    'path' => ['type' => 'string', 'description' => 'Folder name, e.g. Characters/Penelope/Attire/red'],
+                    'folder_id' => ['type' => 'string'],
+                ],
+                'required' => ['path'],
+                'additionalProperties' => false,
+            ],
+        ],
+        [
+            'name' => 'lyre_scene',
+            'description' => 'Create or update a scene (does not rewrite frames). Requires board_id or project_id.',
+            'inputSchema' => [
+                'type' => 'object',
+                'properties' => [
+                    'project_id' => ['type' => 'string'],
+                    'board_id' => ['type' => 'string'],
+                    'scene_id' => ['type' => 'string'],
+                    'title' => ['type' => 'string'],
+                    'logline' => ['type' => 'string'],
+                    'notes' => ['type' => 'string'],
+                    'dialogue' => ['type' => 'string'],
+                    'book' => ['type' => 'string'],
+                ],
+                'additionalProperties' => false,
+            ],
+        ],
+        [
+            'name' => 'lyre_place',
+            'description' => 'Place still, video, or audio. Video with poster dual-writes frame+clip. Requires board_id or project_id.',
+            'inputSchema' => [
+                'type' => 'object',
+                'properties' => [
+                    'project_id' => ['type' => 'string'],
+                    'board_id' => ['type' => 'string'],
+                    'kind' => ['type' => 'string', 'description' => 'still|video|audio'],
+                    'src' => ['type' => 'string'],
+                    'name' => ['type' => 'string'],
+                    'at_sec' => ['type' => 'number'],
+                    'scene_id' => ['type' => 'string'],
+                    'frame_id' => ['type' => 'string'],
+                    'poster_src' => ['type' => 'string'],
+                    'duration_sec' => ['type' => 'number'],
+                    'layer_id' => ['type' => 'string'],
+                ],
+                'required' => ['kind', 'src'],
+                'additionalProperties' => false,
+            ],
+        ],
+        [
+            'name' => 'lyre_trim',
+            'description' => 'JSON-only timeline trim. Stitched members and lc_movie are movie_locked. Requires board_id or project_id.',
+            'inputSchema' => [
+                'type' => 'object',
+                'properties' => [
+                    'project_id' => ['type' => 'string'],
+                    'board_id' => ['type' => 'string'],
+                    'clip_id' => ['type' => 'string'],
+                    'frame_id' => ['type' => 'string'],
+                    'start_sec' => ['type' => 'number'],
+                    'end_sec' => ['type' => 'number'],
+                ],
+                'required' => ['clip_id'],
+                'additionalProperties' => false,
+            ],
+        ],
+        [
+            'name' => 'lyre_move',
+            'description' => 'Move a leftover clip. Stitched members are movie_locked. Requires board_id or project_id.',
+            'inputSchema' => [
+                'type' => 'object',
+                'properties' => [
+                    'project_id' => ['type' => 'string'],
+                    'board_id' => ['type' => 'string'],
+                    'clip_id' => ['type' => 'string'],
+                    'start_sec' => ['type' => 'number'],
+                    'at_sec' => ['type' => 'number'],
+                ],
+                'required' => ['clip_id'],
+                'additionalProperties' => false,
+            ],
+        ],
+        [
+            'name' => 'lyre_delete',
+            'description' => 'Delete a leftover clip. Stitched members require pop. Requires board_id or project_id.',
+            'inputSchema' => [
+                'type' => 'object',
+                'properties' => [
+                    'project_id' => ['type' => 'string'],
+                    'board_id' => ['type' => 'string'],
+                    'clip_id' => ['type' => 'string'],
+                    'frame_id' => ['type' => 'string'],
+                ],
+                'required' => ['clip_id'],
+                'additionalProperties' => false,
+            ],
+        ],
+        [
+            'name' => 'lyre_activity',
+            'description' => 'List activity newest first. If text is set, append a line (mutation; Odysseus refused).',
+            'inputSchema' => [
+                'type' => 'object',
+                'properties' => [
+                    'project_id' => ['type' => 'string'],
+                    'board_id' => ['type' => 'string'],
+                    'limit' => ['type' => 'integer'],
+                    'before_ts' => ['type' => 'integer'],
+                    'text' => ['type' => 'string'],
+                    'type' => ['type' => 'string'],
+                ],
+                'additionalProperties' => false,
+            ],
+        ],
     ];
 }
 
@@ -673,6 +812,45 @@ function gos_lyre_mcp_dispatch_tool(string $name, array $args, array $access): a
             return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
         case 'lyre_open':
             $out = gos_lyre_open_project($access, $args, 'mcp');
+
+            return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
+        case 'lyre_snapshot':
+            $out = gos_lyre_director_snapshot($access, $args);
+
+            return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
+        case 'lyre_folder':
+            $out = gos_lyre_director_folder($access, $args);
+
+            return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
+        case 'lyre_scene':
+            $out = gos_lyre_director_scene($access, $args);
+
+            return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
+        case 'lyre_place':
+            $out = gos_lyre_director_place($access, $args);
+
+            return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
+        case 'lyre_trim':
+            $out = gos_lyre_director_trim($access, $args);
+
+            return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
+        case 'lyre_move':
+            $out = gos_lyre_director_move($access, $args);
+
+            return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
+        case 'lyre_delete':
+            $out = gos_lyre_director_delete($access, $args);
+
+            return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
+        case 'lyre_activity':
+            $text = trim((string) ($args['text'] ?? ''));
+            if ($text !== '') {
+                $args['summary'] = $text;
+                $args['actor'] = 'bot';
+                $out = gos_lyre_director_activity_append($access, $args);
+            } else {
+                $out = gos_lyre_director_activity($access, $args);
+            }
 
             return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
         default:

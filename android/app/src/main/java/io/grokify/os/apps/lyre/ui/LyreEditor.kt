@@ -54,8 +54,13 @@ import io.grokify.os.apps.lyre.BoardData
 import io.grokify.os.apps.lyre.Frame
 import io.grokify.os.apps.lyre.LayerClip
 import io.grokify.os.apps.lyre.LyreActivity
+import io.grokify.os.apps.lyre.LyreActivityFirstOpen
 import io.grokify.os.apps.lyre.LyreActivityLine
+import io.grokify.os.apps.lyre.LyreActivitySync
 import io.grokify.os.apps.lyre.LyreApi
+import io.grokify.os.apps.lyre.LyreHead
+import io.grokify.os.apps.lyre.LyrePoll
+import io.grokify.os.apps.lyre.LyreSavePoll
 import io.grokify.os.apps.lyre.LyreAudioEngine
 import io.grokify.os.apps.lyre.LyreBoardCodec
 import io.grokify.os.apps.lyre.LyreCache
@@ -122,20 +127,29 @@ fun LyreEditor(
     cache: LyreCache,
     store: LyreStore,
     api: LyreApi,
+    initialUpdatedAt: String = "",
     onBack: () -> Unit,
     onBoardChange: (BoardData) -> Unit = {},
-    onProjectOpened: (LyreProject, BoardData) -> Unit = { _, _ -> },
+    onProjectOpened: (LyreProject, BoardData, String) -> Unit = { _, _, _ -> },
 ) {
     val context = LocalContext.current
     val player = remember { LyrePlayer(context.applicationContext) }
     val audio = remember { LyreAudioEngine(context.applicationContext) }
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
+    var editorResumed by remember { mutableStateOf(true) }
     DisposableEffect(player, audio, lifecycleOwner) {
         val obs = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) {
-                player.pause()
-                audio.pause()
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> editorResumed = true
+                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> {
+                    editorResumed = false
+                    if (event == Lifecycle.Event.ON_STOP) {
+                        player.pause()
+                        audio.pause()
+                    }
+                }
+                else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(obs)
@@ -171,6 +185,12 @@ fun LyreEditor(
     var scrubbing by remember { mutableStateOf(false) }
     val activity = remember(boardId) { LyreActivity(cache.activityFile(boardId)) }
     var saveJob by remember { mutableStateOf<Job?>(null) }
+    var boardDirty by remember(boardId) { mutableStateOf(false) }
+    var lastSeenUpdatedAt by remember(boardId) {
+        mutableStateOf(initialUpdatedAt.ifBlank { cache.readBoardStamp(boardId).orEmpty() })
+    }
+    var lastActivityBytes by remember(boardId) { mutableStateOf(-1L) }
+    var serverBanner by remember(boardId) { mutableStateOf<String?>(null) }
     val playEpoch = remember { AtomicInteger(0) }
     val liveRef = rememberUpdatedState(live)
     val stillsRef = rememberUpdatedState(stills)
@@ -183,43 +203,149 @@ fun LyreEditor(
         frameId: String? = null,
         clipId: String? = null,
     ) {
-        activity.append(
-            LyreActivityLine(
-                ts = System.currentTimeMillis(),
-                type = type,
-                projectId = store.projectId,
-                sceneId = sceneId,
-                frameId = frameId,
-                clipId = clipId,
-                summary = summary,
-            ),
+        val line = LyreActivityLine(
+            ts = System.currentTimeMillis(),
+            type = type,
+            projectId = store.projectId,
+            sceneId = sceneId,
+            frameId = frameId,
+            clipId = clipId,
+            summary = summary,
+            actor = "phone",
         )
+        activity.append(line)
         activityTick++
+        scope.launch(Dispatchers.IO) {
+            runCatching { api.activityAppend(boardId, line) }
+        }
+    }
+
+    suspend fun pullActivity() {
+        val json = withContext(Dispatchers.IO) { api.activity(boardId) }
+        if (!json.optBoolean("ok", false)) return
+        val lines = LyreActivitySync.linesFromJson(json)
+        withContext(Dispatchers.IO) { activity.replaceFromServer(lines) }
+        val head = withContext(Dispatchers.IO) { api.head(boardId) }
+        lastActivityBytes = LyreHead.fromJson(head).activityBytes
+        activityTick++
+    }
+
+    suspend fun reloadFromServer() {
+        val json = withContext(Dispatchers.IO) { api.board(boardId) }
+        if (!json.optBoolean("ok", false)) {
+            genStatus = json.optString("error").ifBlank { "reload_failed" }
+            return
+        }
+        val data = json.optJSONObject("data") ?: JSONObject()
+        val stamp = json.optString("updated_at")
+        withContext(Dispatchers.IO) {
+            cache.writeBoardJson(boardId, data)
+            cache.writeBoardStamp(boardId, stamp)
+        }
+        live = LyreBoardCodec.decode(data)
+        onBoardChange(live)
+        lastSeenUpdatedAt = stamp
+        boardDirty = false
+        serverBanner = null
+        pullActivity()
     }
 
     fun commit(next: BoardData, summary: String, type: String = "edit") {
         live = next
         onBoardChange(next)
+        boardDirty = true
         logActivity(type, summary)
         saveJob?.cancel()
         saveJob = scope.launch {
             delay(700)
-            withContext(Dispatchers.IO) {
+            val resp = withContext(Dispatchers.IO) {
                 val json = LyreBoardCodec.encode(next)
                 cache.writeBoardJson(boardId, json)
-                api.saveBoard(store.projectId, json)
+                api.saveBoard(store.projectId, json, lastSeenUpdatedAt)
+            }
+            when (LyrePoll.onSaveResponse(resp.optBoolean("ok", false), resp.optString("error"))) {
+                LyreSavePoll.SAVED -> {
+                    val stamp = resp.optString("updated_at")
+                    if (stamp.isNotEmpty()) {
+                        lastSeenUpdatedAt = stamp
+                        withContext(Dispatchers.IO) { cache.writeBoardStamp(boardId, stamp) }
+                    }
+                    boardDirty = false
+                    serverBanner = null
+                }
+                LyreSavePoll.CONFLICT_RELOAD -> {
+                    saveJob = null
+                    boardDirty = false
+                    genStatus = "conflict"
+                    reloadFromServer()
+                }
+                LyreSavePoll.KEEP_DIRTY -> Unit
+            }
+            saveJob = null
+        }
+    }
+
+    LaunchedEffect(boardId) {
+        withContext(Dispatchers.IO) {
+            val headJson = api.head(boardId)
+            val head = LyreHead.fromJson(headJson)
+            if (lastSeenUpdatedAt.isEmpty() && head.updatedAt.isNotEmpty()) {
+                lastSeenUpdatedAt = head.updatedAt
+                cache.writeBoardStamp(boardId, head.updatedAt)
+            }
+            val localNonEmpty = !activity.isEmpty()
+            when (LyreActivitySync.firstOpenPlan(head.activityBytes, localNonEmpty)) {
+                LyreActivityFirstOpen.PUSH_LOCAL -> {
+                    val local = activity.readAll()
+                    api.activityAppend(boardId, local)
+                    val pulled = api.activity(boardId)
+                    activity.replaceFromServer(LyreActivitySync.linesFromJson(pulled))
+                    lastActivityBytes = LyreHead.fromJson(api.head(boardId)).activityBytes
+                }
+                LyreActivityFirstOpen.PULL_SERVER -> {
+                    val pulled = api.activity(boardId)
+                    activity.replaceFromServer(LyreActivitySync.linesFromJson(pulled))
+                    lastActivityBytes = head.activityBytes
+                }
+                LyreActivityFirstOpen.SEED_LOCAL -> {
+                    activity.seedFromBoardIfEmpty(live, store.projectId)
+                    lastActivityBytes = 0L
+                }
+            }
+        }
+        activityTick++
+        logActivity("open", "Opened ${live.title.ifBlank { "Untitled" }}")
+    }
+
+    LaunchedEffect(boardId, editorResumed) {
+        while (isActive) {
+            delay(LyrePoll.INTERVAL_MS)
+            if (!editorResumed) continue
+            if (!LyrePoll.shouldFetchHead(saveJob != null, boardDirty, scrubbing, genBusy)) {
+                continue
+            }
+            val head = withContext(Dispatchers.IO) {
+                LyreHead.fromJson(api.head(boardId))
+            }
+            val decision = LyrePoll.decide(
+                saveInFlight = saveJob != null,
+                boardDirty = boardDirty,
+                lastSeenUpdatedAt = lastSeenUpdatedAt,
+                lastActivityBytes = lastActivityBytes,
+                head = head,
+            )
+            if (decision.banner != null) {
+                serverBanner = decision.banner
+            }
+            if (decision.reloadBoard) {
+                reloadFromServer()
+            } else if (decision.pullActivity) {
+                pullActivity()
             }
         }
     }
 
     LaunchedEffect(boardId) {
-        logActivity("open", "Opened ${live.title.ifBlank { "Untitled" }}")
-    }
-
-    LaunchedEffect(boardId) {
-        withContext(Dispatchers.IO) {
-            activity.seedFromBoardIfEmpty(live, store.projectId)
-        }
         val map = ConcurrentHashMap<String, File>()
         stills.forEach { (k, v) -> map[k] = v }
         val imgSem = Semaphore(8)
@@ -277,10 +403,24 @@ fun LyreEditor(
         if (filled <= 0) return@LaunchedEffect
         live = waved
         onBoardChange(waved)
-        withContext(Dispatchers.IO) {
+        val wavedResp = withContext(Dispatchers.IO) {
             val json = LyreBoardCodec.encode(waved)
             cache.writeBoardJson(boardId, json)
-            api.saveBoard(store.projectId, json)
+            api.saveBoard(store.projectId, json, lastSeenUpdatedAt)
+        }
+        when (LyrePoll.onSaveResponse(wavedResp.optBoolean("ok", false), wavedResp.optString("error"))) {
+            LyreSavePoll.SAVED -> {
+                val stamp = wavedResp.optString("updated_at")
+                if (stamp.isNotEmpty()) {
+                    lastSeenUpdatedAt = stamp
+                    withContext(Dispatchers.IO) { cache.writeBoardStamp(boardId, stamp) }
+                }
+            }
+            LyreSavePoll.CONFLICT_RELOAD -> {
+                genStatus = "conflict"
+                reloadFromServer()
+            }
+            LyreSavePoll.KEEP_DIRTY -> Unit
         }
         logActivity("cache", "Set $filled waveforms")
     }
@@ -1013,6 +1153,17 @@ fun LyreEditor(
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
             )
         }
+        if (serverBanner != null) {
+            Text(
+                serverBanner!!,
+                color = GrokifyColors.GlowAmber,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier
+                    .clickable { scope.launch { reloadFromServer() } }
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+        }
         if (!genStatus.isNullOrBlank()) {
             Text(
                 genStatus!!,
@@ -1406,10 +1557,14 @@ fun LyreEditor(
                 return@launch
             }
             val data = json.optJSONObject("data") ?: JSONObject()
-            withContext(Dispatchers.IO) { cache.writeBoardJson(next.boardId, data) }
+            val stamp = json.optString("updated_at")
+            withContext(Dispatchers.IO) {
+                cache.writeBoardJson(next.boardId, data)
+                cache.writeBoardStamp(next.boardId, stamp)
+            }
             store.projectId = next.id
             switcher = false
-            onProjectOpened(next, LyreBoardCodec.decode(data))
+            onProjectOpened(next, LyreBoardCodec.decode(data), stamp)
         }
     }
 

@@ -53,7 +53,7 @@ fun LyreActivityPane(
                     .padding(horizontal = 12.dp, vertical = 9.dp),
             ) {
                 Text(
-                    line.summary,
+                    line.displaySummary(),
                     color = GrokifyColors.TextPrimary,
                     fontWeight = FontWeight.Medium,
                     fontSize = 13.sp,

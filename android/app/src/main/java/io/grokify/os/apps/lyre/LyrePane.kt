@@ -65,6 +65,7 @@ fun LyrePane(
     var board by remember { mutableStateOf<BoardData?>(null) }
     var boardId by remember { mutableStateOf<String?>(null) }
     var project by remember { mutableStateOf<LyreProject?>(null) }
+    var boardUpdatedAt by remember { mutableStateOf("") }
 
     BackHandler(onBack = onBack)
     LaunchedEffect(Unit) {
@@ -90,13 +91,16 @@ fun LyrePane(
                 }
                 val data = boardJson.optJSONObject("data") ?: JSONObject()
                 cache.writeBoardJson(picked.boardId, data)
+                val stamp = boardJson.optString("updated_at")
+                cache.writeBoardStamp(picked.boardId, stamp)
                 val decoded = LyreBoardCodec.decode(data)
-                LoadResult(board = decoded, boardId = picked.boardId, project = picked)
+                LoadResult(board = decoded, boardId = picked.boardId, project = picked, updatedAt = stamp)
             }.getOrElse { LoadResult(error = it.message ?: "request_failed") }
         }
         board = result.board
         boardId = result.boardId
         project = result.project
+        boardUpdatedAt = result.updatedAt
         error = result.error
         loading = false
     }
@@ -137,13 +141,15 @@ fun LyrePane(
                     cache = cache,
                     store = store,
                     api = api,
+                    initialUpdatedAt = boardUpdatedAt,
                     onBack = onBack,
                     onBoardChange = { board = it },
-                    onProjectOpened = { p, b ->
+                    onProjectOpened = { p, b, stamp ->
                         store.projectId = p.id
                         project = p
                         boardId = p.boardId
                         board = b
+                        boardUpdatedAt = stamp
                     },
                 )
             }
@@ -190,5 +196,6 @@ private data class LoadResult(
     val board: BoardData? = null,
     val boardId: String? = null,
     val project: LyreProject? = null,
+    val updatedAt: String = "",
     val error: String? = null,
 )

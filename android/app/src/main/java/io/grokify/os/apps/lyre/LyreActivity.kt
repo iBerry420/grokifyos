@@ -11,8 +11,12 @@ data class LyreActivityLine(
     val frameId: String? = null,
     val clipId: String? = null,
     val summary: String,
+    val actor: String? = null,
 ) {
     val jumpable: Boolean get() = !frameId.isNullOrEmpty() || !clipId.isNullOrEmpty() || !sceneId.isNullOrEmpty()
+
+    fun displaySummary(): String =
+        if (actor == "bot") "Bot · $summary" else summary
 
     fun toJson(): JSONObject {
         val o = JSONObject()
@@ -23,12 +27,15 @@ data class LyreActivityLine(
         sceneId?.takeIf { it.isNotEmpty() }?.let { o.put("sceneId", it) }
         frameId?.takeIf { it.isNotEmpty() }?.let { o.put("frameId", it) }
         clipId?.takeIf { it.isNotEmpty() }?.let { o.put("clipId", it) }
+        actor?.takeIf { it.isNotEmpty() }?.let { o.put("actor", it) }
         return o
     }
 
     companion object {
         fun fromJson(obj: JSONObject): LyreActivityLine? {
-            val summary = obj.optString("summary").trim()
+            val summary = obj.optString("summary").trim().ifEmpty {
+                obj.optString("text").trim()
+            }
             if (summary.isEmpty()) return null
             val ts = when (val v = obj.opt("ts")) {
                 is Number -> v.toLong()
@@ -44,6 +51,7 @@ data class LyreActivityLine(
                 frameId = obj.optStringOrNull("frameId"),
                 clipId = obj.optStringOrNull("clipId"),
                 summary = summary,
+                actor = obj.optStringOrNull("actor"),
             )
         }
     }
@@ -62,6 +70,17 @@ class LyreActivity(private val file: File) {
     fun readNewestFirst(): List<LyreActivityLine> {
         val lines = readAll()
         return lines.asReversed()
+    }
+
+    fun isEmpty(): Boolean = synchronized(lock) { !file.isFile || file.length() <= 0L }
+
+    fun replaceFromServer(newestFirst: List<LyreActivityLine>) {
+        synchronized(lock) {
+            file.parentFile?.mkdirs()
+            val oldestFirst = newestFirst.asReversed()
+            val body = oldestFirst.joinToString(separator = "\n", postfix = "\n") { it.toJson().toString() }
+            file.writeText(body, Charsets.UTF_8)
+        }
     }
 
     fun readAll(): List<LyreActivityLine> {

@@ -21,6 +21,24 @@ class LyreActivityTest {
     }
 
     @Test
+    fun actorRoundTripAndBotPrefix() {
+        val line = LyreActivityLine(
+            ts = 9L,
+            type = "place",
+            projectId = "p1",
+            summary = "Placed Hall clip",
+            actor = "bot",
+        )
+        val parsed = LyreActivityLine.fromJson(line.toJson())
+        assertEquals("bot", parsed?.actor)
+        assertEquals("Placed Hall clip", parsed?.summary)
+        assertEquals("Bot · Placed Hall clip", parsed?.displaySummary())
+        val phone = LyreActivityLine(3L, "edit", "p1", summary = "Trim", actor = "phone")
+        assertEquals("Trim", phone.displaySummary())
+        assertEquals("phone", LyreActivityLine.fromJson(phone.toJson())?.actor)
+    }
+
+    @Test
     fun seedWritesOnce() {
         val dir = createTempDirectory("lyre-act").toFile()
         val file = File(dir, "activity.jsonl")
