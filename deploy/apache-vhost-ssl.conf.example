@@ -66,11 +66,7 @@
     </Directory>
 
 
-    # Tokenized LYRE MCP (token lives in the path; do not proxy).
-    # vhost-level: /mcp is NOT inside <Directory /api>
-    # (that Directory RewriteEngine stays for Authorization forwarding only).
-    # [PT] is mandatory: substitution is Alias /api (URL-path), not DocumentRoot.
-    # CexBot’s [QSA,L] to /mcp.php is a different mapping — do not copy those flags.
+    # [PT] is required for Alias /api.
     RewriteEngine On
     RewriteCond %{HTTP:Authorization} .
     RewriteRule ^ - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
@@ -92,8 +88,7 @@
     </IfModule>
 
     ErrorLog ${APACHE_LOG_DIR}/your.domain.example_error.log
-    # Do not write MCP tokens (path secret) to combined. REPLACES the
-    # unconditional CustomLog … combined line — do not leave both.
+    # CustomLog env split replaces combined so /mcp tokens are not logged.
     LogFormat "%h %l %u %t \"MCP /mcp/[redacted] %H\" %>s %b \"%{Referer}i\" \"%{User-Agent}i\"" lyre_mcp_redacted
     SetEnvIf Request_URI "^/mcp" lyre_mcp_req
     CustomLog ${APACHE_LOG_DIR}/your.domain.example_access.log lyre_mcp_redacted env=lyre_mcp_req

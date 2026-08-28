@@ -826,8 +826,12 @@ function gos_lyre_http_mcp_enable(array $access): never
 {
     gos_lyre_http_send(function () use ($access) {
         $userId = gos_lyre_user_id($access);
-        gos_lyre_mcp_enable_for_user($userId);
-        return gos_lyre_mcp_status_payload($userId, null);
+        $ens = gos_lyre_mcp_enable_for_user($userId);
+        $out = gos_lyre_mcp_status_payload($userId, $ens['plain_token']);
+        if (is_string($ens['plain_token']) && $ens['plain_token'] !== '') {
+            $out['plain_token'] = $ens['plain_token'];
+        }
+        return $out;
     });
 }
 

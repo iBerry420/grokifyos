@@ -258,6 +258,33 @@ expect_true($status['enabled'] === true, 'status enabled after mint');
 $ens2 = gos_lyre_mcp_ensure_for_user(42, false);
 expect_eq($ens2['plain_token'], null, 'ensure does not re-mint');
 
+$enFresh = gos_lyre_mcp_enable_for_user(43);
+$freshPlain = (string) ($enFresh['plain_token'] ?? '');
+expect_true(preg_match(GOS_LYRE_MCP_TOKEN_RE, $freshPlain) === 1, 'enable mints when no token');
+$enPayload = gos_lyre_mcp_status_payload(43, $enFresh['plain_token']);
+expect_true(
+    is_string($enPayload['connector_link'] ?? null) && str_contains((string) $enPayload['connector_link'], $freshPlain),
+    'enable mint returns connector_link'
+);
+$enDisk = gos_lyre_mcp_read_json(gos_lyre_mcp_user_path(43));
+expect_eq($enDisk['token_hash'] ?? null, gos_lyre_mcp_hash_token($freshPlain), 'enable stores hash not plaintext');
+expect_true(!isset($enDisk['plain_token']) || $enDisk['plain_token'] === null, 'enable does not persist plaintext');
+$enAgain = gos_lyre_mcp_enable_for_user(43);
+expect_eq($enAgain['plain_token'], null, 'enable existing token does not remint');
+$enAgainStatus = gos_lyre_mcp_status_payload(43, $enAgain['plain_token']);
+expect_eq($enAgainStatus['connector_link'], null, 'enable existing does not leak connector_link');
+gos_lyre_mcp_disable_for_user(43);
+$enRe = gos_lyre_mcp_enable_for_user(43);
+expect_eq($enRe['plain_token'], null, 're-enable does not remint');
+$enableHttpSrc = file_get_contents(dirname(__DIR__) . '/api/lyre.php') ?: '';
+expect_true(
+    preg_match(
+        '/function gos_lyre_http_mcp_enable\(array \$access\): never\s*\{.*?gos_lyre_mcp_status_payload\(\$userId, \$ens\[\'plain_token\'\]\)/s',
+        $enableHttpSrc
+    ) === 1,
+    'http enable passes minted plain_token into status_payload'
+);
+
 $access = [
     'user' => ['id' => 42, 'status' => 'active'],
     'device' => null,

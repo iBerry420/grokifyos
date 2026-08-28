@@ -345,7 +345,8 @@ function gos_lyre_mcp_disable_for_user(int $userId): void
     });
 }
 
-function gos_lyre_mcp_enable_for_user(int $userId): void
+/** @return array{plain_token: ?string} */
+function gos_lyre_mcp_enable_for_user(int $userId): array
 {
     gos_lyre_mcp_with_user_lock($userId, function () use ($userId): void {
         $state = gos_lyre_mcp_user_state($userId);
@@ -364,8 +365,10 @@ function gos_lyre_mcp_enable_for_user(int $userId): void
     });
     $state = gos_lyre_mcp_user_state($userId);
     if (!is_string($state['token_hash'] ?? null) || $state['token_hash'] === '') {
-        gos_lyre_mcp_ensure_for_user($userId, false);
+        return gos_lyre_mcp_ensure_for_user($userId, false);
     }
+
+    return ['plain_token' => null];
 }
 
 function gos_lyre_mcp_touch_last_used(int $userId): void

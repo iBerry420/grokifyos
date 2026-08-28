@@ -31,7 +31,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.grokify.os.apps.lyre.LyreApi
+import io.grokify.os.apps.lyre.LyreCopyLinkKind
 import io.grokify.os.apps.lyre.LyreProject
+import io.grokify.os.apps.lyre.lyreCopyLinkDecision
 import io.grokify.os.apps.lyre.lyreProjectFromJson
 import io.grokify.os.apps.lyre.lyreProjectsFromJson
 import io.grokify.os.ui.theme.GrokifyColors
@@ -83,13 +85,20 @@ fun LyreProjectPicker(
     }
 
     fun copyLink(json: JSONObject) {
-        val link = json.optString("connector_link").trim()
-        if (link.isNotEmpty()) {
-            clipboard.setText(AnnotatedString(link))
-            notice = "Copied connector URL"
-            applyStatus(json)
-        } else {
-            confirmRotate = RotateWhy.Copy
+        val decision = lyreCopyLinkDecision(json)
+        when (decision.kind) {
+            LyreCopyLinkKind.COPY -> {
+                clipboard.setText(AnnotatedString(decision.link))
+                notice = "Copied connector URL"
+                applyStatus(json)
+            }
+            LyreCopyLinkKind.PROMPT_ROTATE -> {
+                applyStatus(json)
+                confirmRotate = RotateWhy.Copy
+            }
+            LyreCopyLinkKind.ERROR -> {
+                notice = decision.error
+            }
         }
     }
 
@@ -212,11 +221,15 @@ fun LyreProjectPicker(
                     TextButton(
                         enabled = !busy,
                         onClick = {
+                            val cached = status
+                            if (cached != null && lyreCopyLinkDecision(cached).kind == LyreCopyLinkKind.COPY) {
+                                copyLink(cached)
+                                return@TextButton
+                            }
                             busy = true
                             scope.launch {
                                 val json = withContext(Dispatchers.IO) { api.mcpEnsure() }
                                 busy = false
-                                applyStatus(json)
                                 copyLink(json)
                             }
                         },
@@ -228,13 +241,21 @@ fun LyreProjectPicker(
                     TextButton(
                         enabled = !busy,
                         onClick = {
+                            val turningOn = !enabled
                             busy = true
                             scope.launch {
                                 val json = withContext(Dispatchers.IO) {
-                                    if (enabled) api.mcpDisable() else api.mcpEnable()
+                                    if (turningOn) api.mcpEnable() else api.mcpDisable()
                                 }
                                 busy = false
                                 applyStatus(json)
+                                if (turningOn) {
+                                    val minted = lyreCopyLinkDecision(json)
+                                    if (minted.kind == LyreCopyLinkKind.COPY) {
+                                        clipboard.setText(AnnotatedString(minted.link))
+                                        notice = "Copied connector URL"
+                                    }
+                                }
                             }
                         },
                     ) {
@@ -275,8 +296,7 @@ fun LyreProjectPicker(
                         scope.launch {
                             val json = withContext(Dispatchers.IO) { api.mcpRotate() }
                             busy = false
-                            applyStatus(json)
-                            if (why != null) copyLink(json)
+                            if (why != null) copyLink(json) else applyStatus(json)
                         }
                     },
                 ) { Text("Rotate", color = GrokifyColors.GlowAmber) }

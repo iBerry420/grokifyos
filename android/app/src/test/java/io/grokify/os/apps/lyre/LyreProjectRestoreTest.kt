@@ -1,5 +1,6 @@
 package io.grokify.os.apps.lyre
 
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -61,5 +62,46 @@ class LyreProjectRestoreTest {
     @Test
     fun emptyListReturnsNull() {
         assertNull(lyreRestoreProject(emptyList(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+    }
+
+    @Test
+    fun copyLinkCopiesWhenConnectorLinkPresent() {
+        val json = JSONObject()
+            .put("ok", true)
+            .put("has_connector", true)
+            .put("connector_link", "https://grokifyos.grokpot.io/mcp/lyre_mcp_aaa")
+        val d = lyreCopyLinkDecision(json)
+        assertEquals(LyreCopyLinkKind.COPY, d.kind)
+        assertEquals("https://grokifyos.grokpot.io/mcp/lyre_mcp_aaa", d.link)
+    }
+
+    @Test
+    fun copyLinkPromptsRotateOnlyWhenHasConnectorAndNoLink() {
+        val json = JSONObject()
+            .put("ok", true)
+            .put("has_connector", true)
+            .put("connector_link", JSONObject.NULL)
+        val d = lyreCopyLinkDecision(json)
+        assertEquals(LyreCopyLinkKind.PROMPT_ROTATE, d.kind)
+    }
+
+    @Test
+    fun copyLinkDoesNotRotateOnError() {
+        val json = JSONObject()
+            .put("ok", false)
+            .put("error", "confirm_required")
+            .put("has_connector", true)
+        val d = lyreCopyLinkDecision(json)
+        assertEquals(LyreCopyLinkKind.ERROR, d.kind)
+        assertEquals("confirm_required", d.error)
+    }
+
+    @Test
+    fun copyLinkDoesNotRotateWhenEnsureOkButNoConnector() {
+        val json = JSONObject()
+            .put("ok", true)
+            .put("has_connector", false)
+        val d = lyreCopyLinkDecision(json)
+        assertEquals(LyreCopyLinkKind.ERROR, d.kind)
     }
 }

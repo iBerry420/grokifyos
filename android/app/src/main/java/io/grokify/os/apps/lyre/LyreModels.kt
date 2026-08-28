@@ -263,6 +263,35 @@ fun lyreRestoreProject(projects: List<LyreProject>, storedId: String): LyreProje
     return projects.firstOrNull { it.isOdysseus || it.boardId == "lyre" }
 }
 
+enum class LyreCopyLinkKind { COPY, PROMPT_ROTATE, ERROR }
+
+data class LyreCopyLinkDecision(
+    val kind: LyreCopyLinkKind,
+    val link: String = "",
+    val error: String = "",
+)
+
+/** Copy plaintext when present; rotate only after a successful status with a stored connector. */
+fun lyreCopyLinkDecision(json: JSONObject): LyreCopyLinkDecision {
+    if (!json.optBoolean("ok", false)) {
+        return LyreCopyLinkDecision(
+            kind = LyreCopyLinkKind.ERROR,
+            error = json.optString("error").ifBlank { "request_failed" },
+        )
+    }
+    val link = json.optStringOrNull("connector_link")?.trim().orEmpty()
+    if (link.isNotEmpty()) {
+        return LyreCopyLinkDecision(kind = LyreCopyLinkKind.COPY, link = link)
+    }
+    if (json.optBoolean("has_connector", false)) {
+        return LyreCopyLinkDecision(kind = LyreCopyLinkKind.PROMPT_ROTATE)
+    }
+    return LyreCopyLinkDecision(
+        kind = LyreCopyLinkKind.ERROR,
+        error = json.optString("error").ifBlank { "request_failed" },
+    )
+}
+
 internal fun jsonTruthy(obj: JSONObject, key: String): Boolean {
     if (!obj.has(key) || obj.isNull(key)) return false
     return when (val v = obj.get(key)) {
