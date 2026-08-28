@@ -23,6 +23,7 @@ class LyreCache(
     private val isOnline: () -> Boolean = { networkOnline(ctx.applicationContext) },
 ) {
     private val root = File(ctx.applicationContext.filesDir, "lyre")
+    private val misses = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     fun boardDir(boardId: String): File {
         val safe = boardId.replace(UNSAFE, "_").ifBlank { "_" }
@@ -33,9 +34,20 @@ class LyreCache(
     }
 
     fun objectFile(boardId: String, objectKey: String): File {
-        val ext = objectKey.substringAfterLast('.', "").lowercase()
+        val key = LyreStorageKeys.normalize(objectKey) ?: objectKey.trim()
+        val ext = key.substringAfterLast('.', "").lowercase()
         val safeExt = if (ext.matches(EXT)) ext else "bin"
-        return File(File(boardDir(boardId), "objects"), "${sha1Hex(objectKey)}.$safeExt")
+        return File(File(boardDir(boardId), "objects"), "${sha1Hex(key)}.$safeExt")
+    }
+
+    fun activityFile(boardId: String): File = File(boardDir(boardId), "activity.jsonl")
+
+    fun writeObject(boardId: String, objectKey: String, bytes: ByteArray): File {
+        val dest = objectFile(boardId, objectKey)
+        dest.parentFile?.mkdirs()
+        dest.writeBytes(bytes)
+        misses.remove(LyreStorageKeys.normalize(objectKey) ?: objectKey)
+        return dest
     }
 
     fun writeBoardJson(boardId: String, data: JSONObject) {
@@ -73,18 +85,27 @@ class LyreCache(
     }
 
     fun resolve(boardId: String, objectKey: String): File? {
-        val dest = objectFile(boardId, objectKey)
-        if (dest.isFile && dest.length() > 0L) return dest
+        val key = LyreStorageKeys.normalize(objectKey) ?: return null
+        val dest = objectFile(boardId, key)
+        if (dest.isFile && dest.length() > 0L) {
+            misses.remove(key)
+            return dest
+        }
+        val missAt = misses[key]
+        if (missAt != null && System.currentTimeMillis() - missAt < MISS_TTL_MS) return null
         if (!isOnline()) return null
         val part = File(dest.path + ".part")
-        fun fail(): File? {
+        fun fail(remember: Boolean = false): File? {
             dest.delete()
             part.delete()
+            if (remember) misses[key] = System.currentTimeMillis()
             return null
         }
         return try {
-            api.getStorage(objectKey).use { resp ->
-                if (!resp.isSuccessful) return fail()
+            api.getStorage(key).use { resp ->
+                if (!resp.isSuccessful) return fail(remember = resp.code == 404 || resp.code == 400)
+                val ct = resp.header("Content-Type").orEmpty().lowercase()
+                if (ct.contains("json")) return fail(remember = true)
                 val body = resp.body ?: return fail()
                 val expected = resp.header("Content-Length")?.trim()?.toLongOrNull()?.takeIf { it >= 0L }
                 part.parentFile?.mkdirs()
@@ -122,6 +143,7 @@ class LyreCache(
         private val UNSAFE = Regex("[^A-Za-z0-9._-]")
         private val EXT = Regex("[a-z0-9]{1,8}")
         private val SUBDIRS = listOf("objects", "orig", "tmp", "movie-gens", "undo", "pending")
+        private const val MISS_TTL_MS = 120_000L
 
         private fun sha1Hex(value: String): String {
             val bytes = MessageDigest.getInstance("SHA-1").digest(value.toByteArray(Charsets.UTF_8))

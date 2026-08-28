@@ -6408,8 +6408,9 @@ private fun DjPromptTemplatesSection(
     Text(
         "Full control: research angles, banter bits, behaviors, and the " +
             "system prompts for banter / research / chat / queue rank (AI pick). " +
-            "Enabled custom research + banter bits are always used — they are not " +
-            "a lottery. Built-ins still rotate. Edit any body or add your own.",
+            "Enabled research angles and banter bits share one lottery each talk " +
+            "(1–3 angles; handoff + rotating bits). Custom is a peer, not every " +
+            "cycle. Edit any body or add your own.",
         color = GrokifyColors.TextDim,
         fontSize = 10.sp,
     )

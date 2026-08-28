@@ -27,6 +27,18 @@ data class GbotHostStatus(
     val busy: Boolean,
 )
 
+data class GbotComputer(
+    val enabled: Boolean,
+    val registered: Boolean,
+    val overlayPresent: Boolean,
+    val computerId: String,
+    val computerLabel: String,
+    val hostname: String,
+    val pid: Int?,
+    val credentialPresent: Boolean,
+    val connectionPresent: Boolean,
+)
+
 data class GbotSettings(
     val localToolPermission: String,
     val autoReviewEnabled: Boolean,
@@ -283,6 +295,7 @@ data class GbotSnapshot(
     val agents: List<GbotAgent>,
     val pending: List<GbotPendingCard>,
     val automations: List<GbotAutomation> = emptyList(),
+    val computer: GbotComputer? = null,
     val error: String? = null,
     val agentsOk: Boolean = true,
 )
@@ -351,6 +364,26 @@ object GbotParse {
             expiresAt = GbotJson.long(raw, "expiresAt"),
             boxConnected = GbotJson.bool(raw, "boxConnected"),
             localExec = GbotJson.bool(raw, "localExec"),
+        )
+    }
+
+    fun computer(raw: JSONObject?): GbotComputer? {
+        if (raw == null) return null
+        val row = when {
+            raw.has("computerId") || raw.has("registered") -> raw
+            else -> raw.optJSONArray("computers")?.optJSONObject(0)
+        } ?: return null
+        val pid = if (row.isNull("pid")) null else GbotJson.int(row, "pid").takeIf { it > 0 }
+        return GbotComputer(
+            enabled = GbotJson.bool(row, "enabled"),
+            registered = GbotJson.bool(row, "registered"),
+            overlayPresent = GbotJson.bool(row, "overlayPresent"),
+            computerId = GbotJson.str(row, "computerId"),
+            computerLabel = GbotJson.str(row, "computerLabel").ifBlank { GbotJson.str(row, "computerId") },
+            hostname = GbotJson.str(row, "hostname"),
+            pid = pid,
+            credentialPresent = GbotJson.bool(row, "credentialPresent"),
+            connectionPresent = GbotJson.bool(row, "connectionPresent"),
         )
     }
 
@@ -847,6 +880,7 @@ object GbotParse {
             agents = parsedAgents,
             pending = pendingCards(data.opt("pending")),
             automations = automations(data.opt("automations")),
+            computer = computer(data.optJSONObject("computers")),
             agentsOk = agentsOk,
         )
     }

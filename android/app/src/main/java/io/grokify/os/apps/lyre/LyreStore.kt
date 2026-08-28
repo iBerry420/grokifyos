@@ -10,8 +10,8 @@ class LyreStore(ctx: Context) {
         set(v) = prefs.edit().putString(KEY_PROJECT, v.trim()).apply()
 
     var chip: String
-        get() = prefs.getString(KEY_CHIP, "scenes")?.trim().orEmpty().ifBlank { "scenes" }
-        set(v) = prefs.edit().putString(KEY_CHIP, v.trim().ifBlank { "scenes" }).apply()
+        get() = prefs.getString(KEY_CHIP, "")?.trim().orEmpty()
+        set(v) = prefs.edit().putString(KEY_CHIP, v.trim()).apply()
 
     var museOpen: Boolean
         get() = prefs.getBoolean(KEY_MUSE, false)
@@ -25,6 +25,10 @@ class LyreStore(ctx: Context) {
         get() = prefs.getFloat(KEY_PLAYHEAD, 0f)
         set(v) = prefs.edit().putFloat(KEY_PLAYHEAD, v).apply()
 
+    var timelinePps: Float
+        get() = prefs.getFloat(KEY_PPS, 20f).coerceIn(8f, 96f)
+        set(v) = prefs.edit().putFloat(KEY_PPS, v.coerceIn(8f, 96f)).apply()
+
     companion object {
         private const val PREFS = "lyre_prefs"
         private const val KEY_PROJECT = "project_id"
@@ -32,5 +36,6 @@ class LyreStore(ctx: Context) {
         private const val KEY_MUSE = "muse_open"
         private const val KEY_LOOP = "loop_clip"
         private const val KEY_PLAYHEAD = "playhead"
+        private const val KEY_PPS = "timeline_pps"
     }
 }

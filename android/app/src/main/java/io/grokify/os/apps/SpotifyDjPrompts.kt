@@ -7,9 +7,9 @@ import org.json.JSONObject
  * Editable prompt templates for Live DJ.
  *
  * Categories:
- * - [DjPromptKind.Research] — research angle briefs (multi-enable → random pack each talk)
+ * - [DjPromptKind.Research] — research angle briefs (multi-enable → random 1–3 each talk)
  * - [DjPromptKind.Behavior] — on-mic personality (one active)
- * - [DjPromptKind.Banter] — on-air talking points (multi-enable; customs always spoken)
+ * - [DjPromptKind.Banter] — on-air talking points (multi-enable; handoff + rotating extras)
  * - [DjPromptKind.BanterSystem] — full on-air banter system rules (one body)
  * - [DjPromptKind.ResearchSystem] — research agent envelope (one body)
  * - [DjPromptKind.ChatSystem] — booth chat system rules (one body)
@@ -64,16 +64,17 @@ enum class DjPromptKind {
     val sectionBlurb: String
         get() = when (this) {
             Research ->
-                "Enabled custom angles are always in the pack (they are not a lottery). " +
-                    "Built-ins still rotate 1–3. Edit briefs or add your own. Use {{CITY}} " +
-                    "for the listener metro. Custom findings go on-air — they are not dropped."
+                "Every enabled angle — built-in or custom — sits in one lottery. " +
+                    "Each talk draws 1–3, preferring ones you have not heard recently. " +
+                    "Off switches stay out. Edit briefs or add your own. Use {{CITY}} " +
+                    "for the listener metro. A custom angle is required on-air only " +
+                    "when it is in this cycle's pack."
             Behavior ->
                 "Pick one personality for on-mic delivery (after research). " +
                     "Edit body or add a custom vibe."
             Banter ->
-                "These are the spoken talking points. Enabled customs are always used " +
-                    "(not a lottery). Built-ins rotate. Edit or add bits — the DJ must " +
-                    "cover them instead of only saying what just played and what's next. " +
+                "Spoken talking points. Track handoff stays on when enabled so the " +
+                    "next cut is named. Other bits (built-in + custom) rotate. " +
                     "Use {{CITY}} for the listener metro."
             BanterSystem ->
                 "Core rules for spoken handoff lines. Placeholders: " +
@@ -399,16 +400,18 @@ object DjPromptDefaults {
                 "• Song titles often include (feat. X) / (with X) / - feat. X. NEVER read parentheses " +
                 "featuring credits. NEVER say the artist name twice because it appears in the title " +
                 "and the artist field. Use the CLEAN title and PRIMARY artist only.\n" +
-                "• BANTER BITS / REQUIRED TALKING POINTS are the listener's prompt templates " +
-                "for this talk (built-in + any they wrote). You MUST cover each required talking " +
-                "point — never collapse to only \"that was [artist] / here's [next]\". " +
-                "RESEARCH pack varies each talk (lyrics, album/song facts, artist facts, shows/tours, " +
-                "X/social, radio host color, PLUS any custom angles the listener added). " +
-                "If RESEARCH includes Custom: or News: lines, you MUST weave at least one of those " +
-                "beats — do not skip a custom angle for a generic song fact. Otherwise weave ONE " +
-                "vivid built-in beat (lyric theme, album+year, artist fact, show date — city only " +
-                "as location — X/social buzz, host color, or a later-set tease). Then hand off with " +
-                "\"here's [clean title] by [primary artist]\" or similar.\n" +
+                "• BANTER BITS / REQUIRED TALKING POINTS are this cycle's drawn templates. " +
+                "Cover each required talking point — never collapse to only " +
+                "\"that was [artist] / here's [next]\" when more is listed. " +
+                "RESEARCH is a random 1–3 pack from the listener's enabled angles " +
+                "(built-in lyrics / album / artist / shows / X / radio color AND any " +
+                "custom angles they added). Custom is a peer in that lottery — not every talk. " +
+                "If RESEARCH includes Custom: or News: lines, weave at least one of those " +
+                "beats. Otherwise weave ONE vivid beat from this pack (lyric theme, album+year, " +
+                "artist fact, show date — city only as location — X/social buzz, host color, " +
+                "or a later-set tease). Do not invent a custom/news beat when this pack " +
+                "has none. Then hand off with \"here's [clean title] by [primary artist]\" " +
+                "or similar.\n" +
                 "• Lyric themes: comment on what the song is about in your own words; " +
                 "do NOT recite long lyrics or copyrighted lines.\n" +
                 "• If RESEARCH is empty, still do a solid handoff; do not invent tour dates, " +
@@ -451,8 +454,9 @@ object DjPromptDefaults {
                 "\"news\":[\"≤22 words — world/US/local news when that angle is on\"]" +
                 "}\n" +
                 "Rules: fill ONLY fields that match this turn's angles (others empty); " +
-                "custom / user-written angles MUST go in custom_notes (and news if they are news); " +
-                "never drop a custom angle because it is not lyrics/album/shows; " +
+                "when a custom / user-written angle is listed above, put findings in " +
+                "custom_notes (and news if they are news) — never drop it because it is " +
+                "not lyrics/album/shows; if no custom angle is listed, leave custom_notes/news empty; " +
                 "max 2 album_facts, 4 facts, 3 shows, 3 x_social, 3 radio_color, 2 setlist_tease, " +
                 "4 custom_notes, 3 news; " +
                 "prefer verifiable/recent; NEVER invent tour dates, chart numbers, lyric meaning, " +
@@ -598,104 +602,170 @@ fun mergePromptTemplates(saved: List<DjPromptTemplate>): List<DjPromptTemplate> 
     )
 }
 
+/** One coordinated research + banter-bit draw for a single talk cycle. */
+data class DjTalkPack(
+    val research: List<DjPromptTemplate>,
+    val banterBits: List<DjPromptTemplate>,
+) {
+    val customResearch: List<DjPromptTemplate>
+        get() = research.filter { !it.builtIn }
+
+    val hasCustomResearch: Boolean
+        get() = customResearch.isNotEmpty()
+}
+
+/** Which research JSON fields this cycle's angle pack should fill. */
+data class DjResearchFieldMask(
+    val lyrics: Boolean,
+    val albumArtist: Boolean,
+    val shows: Boolean,
+    val social: Boolean,
+    val radio: Boolean,
+    val custom: Boolean,
+)
+
+/**
+ * Newest picks first. Older ids drop off the end so the lottery can
+ * rotate back to them after a couple of talks.
+ */
+fun rememberRecentPromptIds(
+    existing: List<String>,
+    picked: List<String>,
+    cap: Int = 4,
+): List<String> {
+    val next = LinkedHashSet<String>()
+    picked.map { it.trim() }.filter { it.isNotEmpty() }.forEach { next.add(it) }
+    existing.map { it.trim() }.filter { it.isNotEmpty() }.forEach { next.add(it) }
+    return next.take(cap.coerceAtLeast(1))
+}
+
+internal fun pickCount1to3(rng: kotlin.random.Random, max: Int): Int {
+    if (max <= 1) return max.coerceAtLeast(0)
+    val n = when (rng.nextInt(10)) {
+        in 0..5 -> 1
+        in 6..8 -> 2
+        else -> 3
+    }
+    return n.coerceIn(1, max)
+}
+
+internal fun pickFromEnabledPool(
+    pool: List<DjPromptTemplate>,
+    count: Int,
+    recentIds: Collection<String>,
+    rng: kotlin.random.Random,
+): List<DjPromptTemplate> {
+    if (pool.isEmpty() || count <= 0) return emptyList()
+    val recent = recentIds.toSet()
+    val unused = pool.filter { it.id !in recent }.shuffled(rng)
+    val used = pool.filter { it.id in recent }.shuffled(rng)
+    return (unused + used).take(count.coerceAtMost(pool.size))
+}
+
+fun enabledResearchPool(all: List<DjPromptTemplate>): List<DjPromptTemplate> {
+    val research = all.filter { it.kind == DjPromptKind.Research && it.body.isNotBlank() }
+    return research.filter { it.enabled }.ifEmpty { DjPromptDefaults.researchAngles() }
+}
+
+fun enabledBanterPool(all: List<DjPromptTemplate>): List<DjPromptTemplate> {
+    val banter = all.filter { it.kind == DjPromptKind.Banter && it.body.isNotBlank() }
+    return banter.filter { it.enabled }.ifEmpty { DjPromptDefaults.banterBits() }
+}
+
 /**
  * Build this talk's research pack.
  *
- * Enabled **custom** angles are always included (the listener wrote them on
- * purpose). Built-ins still rotate 1–3 when no custom is on, or 0–2 extras
- * alongside customs. Falls back to stock angles if nothing is enabled.
+ * Every enabled angle (built-in + custom) is a peer in one lottery.
+ * Draws 1–3, preferring ids not in [recentIds]. Disabled stay out.
  */
 fun pickResearchTemplates(
     all: List<DjPromptTemplate>,
     rng: kotlin.random.Random = kotlin.random.Random.Default,
+    recentIds: Collection<String> = emptyList(),
 ): List<DjPromptTemplate> {
-    val research = all.filter { it.kind == DjPromptKind.Research && it.body.isNotBlank() }
-    val enabled = research.filter { it.enabled }.ifEmpty { research }
-        .ifEmpty { DjPromptDefaults.researchAngles() }
-    val custom = enabled.filter { !it.builtIn }
-    val builtIn = enabled.filter { it.builtIn }
-    val picked = ArrayList<DjPromptTemplate>(custom.size + 3)
-    picked.addAll(custom)
-    if (builtIn.isNotEmpty()) {
-        val extra = if (custom.isEmpty()) {
-            when (rng.nextInt(10)) {
-                in 0..5 -> 1
-                in 6..8 -> 2
-                else -> 3
-            }.coerceIn(1, builtIn.size)
-        } else {
-            when (rng.nextInt(10)) {
-                in 0..4 -> 1
-                in 5..7 -> 2
-                else -> 0
-            }.coerceIn(0, builtIn.size)
-        }
-        if (extra > 0) picked.addAll(builtIn.shuffled(rng).take(extra))
-    }
-    if (picked.isEmpty()) return listOf(DjPromptDefaults.researchAngles().first())
-    return picked
+    val pool = enabledResearchPool(all)
+    val picked = pickFromEnabledPool(pool, pickCount1to3(rng, pool.size), recentIds, rng)
+    return picked.ifEmpty { listOf(DjPromptDefaults.researchAngles().first()) }
 }
 
 /**
  * Build this talk's banter talking-point pack.
  *
- * Enabled **custom** banter bits are always included. Built-in handoff stays
- * on when enabled so the next cut is still named; other built-ins rotate.
+ * Track handoff stays on when enabled. Other bits (built-in + custom)
+ * rotate 1–2 from the enabled extras, preferring [recentIds] misses.
  */
 fun pickBanterTemplates(
     all: List<DjPromptTemplate>,
     rng: kotlin.random.Random = kotlin.random.Random.Default,
+    recentIds: Collection<String> = emptyList(),
 ): List<DjPromptTemplate> {
-    val banter = all.filter { it.kind == DjPromptKind.Banter && it.body.isNotBlank() }
-    val enabled = banter.filter { it.enabled }.ifEmpty { banter }
-        .ifEmpty { DjPromptDefaults.banterBits() }
-    val custom = enabled.filter { !it.builtIn }
-    val builtIn = enabled.filter { it.builtIn }
-    val picked = ArrayList<DjPromptTemplate>(custom.size + 3)
-    picked.addAll(custom)
-    val handoff = builtIn.firstOrNull { it.id == DjPromptDefaults.ID_BANTER_HANDOFF }
+    val enabled = enabledBanterPool(all)
+    val handoff = enabled.firstOrNull { it.id == DjPromptDefaults.ID_BANTER_HANDOFF }
+    val extras = enabled.filter { it.id != DjPromptDefaults.ID_BANTER_HANDOFF }
+    val picked = ArrayList<DjPromptTemplate>(3)
     if (handoff != null) picked.add(handoff)
-    val extras = builtIn.filter { it.id != DjPromptDefaults.ID_BANTER_HANDOFF }
     if (extras.isNotEmpty()) {
-        val extraN = if (custom.isEmpty()) {
-            when (rng.nextInt(10)) {
-                in 0..5 -> 1
-                in 6..8 -> 2
-                else -> 1
-            }.coerceIn(1, extras.size)
-        } else {
-            when (rng.nextInt(10)) {
-                in 0..5 -> 1
-                else -> 0
-            }.coerceIn(0, extras.size)
-        }
-        if (extraN > 0) picked.addAll(extras.shuffled(rng).take(extraN))
+        val extraN = when (rng.nextInt(10)) {
+            in 0..5 -> 1
+            in 6..8 -> 2
+            else -> 1
+        }.coerceIn(1, extras.size)
+        picked.addAll(pickFromEnabledPool(extras, extraN, recentIds, rng))
     }
-    if (picked.isEmpty()) return listOf(DjPromptDefaults.banterBits().first())
-    return picked.distinctBy { it.id }
+    return picked.ifEmpty { listOf(DjPromptDefaults.banterBits().first()) }.distinctBy { it.id }
 }
 
+fun pickDjTalkPack(
+    all: List<DjPromptTemplate>,
+    recentResearchIds: Collection<String> = emptyList(),
+    recentBanterIds: Collection<String> = emptyList(),
+    rng: kotlin.random.Random = kotlin.random.Random.Default,
+): DjTalkPack = DjTalkPack(
+    research = pickResearchTemplates(all, rng, recentResearchIds),
+    banterBits = pickBanterTemplates(all, rng, recentBanterIds),
+)
+
+/** Required on-air beats for this cycle: picked banter bits + picked custom research. */
+fun talkingPointsForPack(pack: DjTalkPack): List<DjPromptTemplate> =
+    (pack.customResearch + pack.banterBits).distinctBy { it.id }
+
 /**
- * Talking points the spoken line must cover: picked banter bits plus every
- * enabled custom research angle (so a news angle cannot be researched then dropped).
+ * Talking points for a freshly drawn pack. Prefer [talkingPointsForPack] with
+ * the same [DjTalkPack] the researcher used so custom is not required unless
+ * it was actually drawn this cycle.
  */
 fun collectBanterTalkingPoints(
     all: List<DjPromptTemplate>,
     rng: kotlin.random.Random = kotlin.random.Random.Default,
-): List<DjPromptTemplate> {
-    val banter = pickBanterTemplates(all, rng)
-    val customResearch = all.filter {
-        it.kind == DjPromptKind.Research &&
-            it.enabled &&
-            !it.builtIn &&
-            it.body.isNotBlank()
-    }
-    val seen = HashSet<String>()
-    return buildList {
-        for (t in customResearch + banter) {
-            if (seen.add(t.id)) add(t)
-        }
-    }
+    recentResearchIds: Collection<String> = emptyList(),
+    recentBanterIds: Collection<String> = emptyList(),
+): List<DjPromptTemplate> =
+    talkingPointsForPack(pickDjTalkPack(all, recentResearchIds, recentBanterIds, rng))
+
+fun researchFieldMask(angles: List<DjPromptTemplate>): DjResearchFieldMask {
+    fun idHit(vararg needles: String): Boolean =
+        angles.any { a -> needles.any { n -> a.id.contains(n, ignoreCase = true) } }
+
+    fun bodyHit(vararg needles: String): Boolean =
+        angles.any { a -> needles.any { n -> a.body.contains(n, ignoreCase = true) } }
+
+    val lyrics = idHit("lyric", "theme", "meaning") ||
+        bodyHit("LYRICS & MEANING", "LYRICS AND MEANING")
+    val albumArtist = idHit("album_song_facts", "artist_facts") ||
+        bodyHit("ALBUM / SONG FACTS", "ARTIST FACTS:")
+    val shows = idHit("show", "tour") || bodyHit("SHOWS & TOURS", "SHOWS AND TOURS")
+    val social = idHit("x_social", "recent_x") ||
+        bodyHit("RECENT X / SOCIAL", "X/social")
+    val radio = idHit("radio", "host_color") || bodyHit("RADIO HOST COLOR")
+    val custom = angles.any { !it.builtIn }
+    return DjResearchFieldMask(
+        lyrics = lyrics,
+        albumArtist = albumArtist,
+        shows = shows,
+        social = social,
+        radio = radio,
+        custom = custom,
+    )
 }
 
 fun formatBanterTalkingPointsBlock(
@@ -829,6 +899,11 @@ fun buildBanterUserPrompt(input: DjBanterUserPromptInput): String {
                 appendLine(
                     "CUSTOM ANGLE REQUIRED: weave at least one Custom:/News: beat. " +
                         "Do not replace it with a generic song fact.",
+                )
+            } else {
+                appendLine(
+                    "This cycle's research pack has no custom/news beat. " +
+                        "Do not invent one — weave a beat from the listed RESEARCH only.",
                 )
             }
         } else if (input.talkingPoints.isEmpty()) {

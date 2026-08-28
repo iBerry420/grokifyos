@@ -70,10 +70,24 @@ object LyreMovie {
     }
 
     fun clipInMovie(movie: BoardMovie?, clipId: String, layers: List<MediaLayer>): Boolean {
+        if (clipId == "lc_movie") return true
         if (movie?.parts?.any { it.clipId == clipId } == true) return true
         if (!movie?.src.isNullOrEmpty()) return false
         val first = orderedVideoClips(layers).firstOrNull()
         return first != null && first.id == clipId
+    }
+
+    fun isStitchedMember(movie: BoardMovie?, clipId: String): Boolean {
+        if (clipId == "lc_movie") return (movie?.parts?.size ?: 0) > 1
+        val parts = movie?.parts ?: return false
+        return parts.size > 1 && parts.any { it.clipId == clipId }
+    }
+
+    fun isStitchedFrame(movie: BoardMovie?, layers: List<MediaLayer>, frameId: String): Boolean {
+        if (movie == null || movie.parts.size <= 1) return false
+        return orderedVideoClips(layers).any { clip ->
+            clip.linkedFrameId == frameId && isStitchedMember(movie, clip.id)
+        }
     }
 
     fun frameInMovie(movie: BoardMovie?, layers: List<MediaLayer>, frameId: String): Boolean {

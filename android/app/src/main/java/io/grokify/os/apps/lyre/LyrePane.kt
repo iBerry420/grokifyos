@@ -129,7 +129,9 @@ fun LyrePane(
                 boardId = loadedId,
                 cache = cache,
                 store = store,
+                api = api,
                 onBack = onBack,
+                onBoardChange = { board = it },
             )
         }
         else -> {

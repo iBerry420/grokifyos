@@ -148,7 +148,7 @@ See root **[README.md § Changelog](../README.md#changelog)** for full history. 
 
 | Channel | versionName | versionCode | Notes |
 |---------|-------------|-------------|--------|
-| **phone** | **0.1.273** | **273** | Live DJ: custom research / Banter bits, hard skip, BLOCKS, two-song bake; chat history cap |
+| **phone** | **0.1.295** | **295** | Grok Bot: full Bots pane, connectors, back stack, chat flicker fix |
 | **wear** | **0.1.8** | **8** | Standalone AI + radial HUD; on-watch Update app |
 | **wear-face** | **0.1.1** | **1** | WFF always-on face (time + HR/steps complications) |
 | phone | 0.1.250 | 250 | Grok logout + re-login; Companion world; Android Auto |

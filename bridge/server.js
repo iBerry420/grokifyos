@@ -75,8 +75,11 @@ const DB_CONFIG = buildDbConfig();
 
 let ALLOWED_MODELS = new Set();
 let GROK_MODELS_FULL = [];
+let grokModelsLoadedAt = 0;
 
 const agents = new Map();
+/** In-memory CLI usage scan (invalidated after each agent harvest). */
+let usageTrackerMem = { at: 0, sessions: null, scanned: 0 };
 
 /** app_settings key: agent process cwd (empty/missing → WORKSPACE install path). */
 const SETTING_AGENT_CWD = 'bridge_agent_cwd';
@@ -96,6 +99,7 @@ const mediaIngest = createMediaIngest({
     workspace: WORKSPACE,
     log: (level, category, msg, ctx) => log(level, category, msg, ctx),
 });
+const usageHarvest = require('./usage-harvest');
 
 function ensureLogDir() {
     const dir = path.dirname(LOG_FILE);
@@ -187,11 +191,53 @@ function refreshGrokModels() {
         if (models.length) {
             GROK_MODELS_FULL = decorateModels(models, REASONING_EFFORT);
             ALLOWED_MODELS = nextAllowed;
+            grokModelsLoadedAt = Date.now();
             log('info', 'agent', `Loaded ${models.length} Grok Build models`, { sample: models.map((m) => m.id) });
         }
     } catch (err) {
         log('warning', 'error', `Grok model list failed: ${err.message}`, {});
     }
+}
+
+function refreshGrokModelsIfStale(maxAgeMs = 60000) {
+    if (!GROK_MODELS_FULL.length || Date.now() - grokModelsLoadedAt > maxAgeMs) {
+        refreshGrokModels();
+    }
+}
+
+/** Accept gb:grok-4.6, grok:grok-4.6, or a raw future id from `grok models`. */
+function resolveCompleteModel(model) {
+    let real = grokRealModel(model);
+    if (!real || real === 'undefined') real = DEFAULT_GROK_MODEL;
+    if (GROK_MODELS_FULL.length && !GROK_MODELS_FULL.some((m) => m.id === real)) {
+        if (!/^[a-z0-9][a-z0-9._-]{1,79}$/i.test(real)) {
+            real = GROK_MODELS_FULL[0]?.id || DEFAULT_GROK_MODEL;
+        }
+    }
+    return real;
+}
+
+function stripAnsi(s) {
+    return String(s || '').replace(/\x1B\[[0-9;]*[A-Za-z]/g, '');
+}
+
+function extractCompleteText(raw, json) {
+    const s = String(raw || '').trim();
+    if (!s) return '';
+    if (!json) return s;
+    const start = s.indexOf('{');
+    const end = s.lastIndexOf('}');
+    const slice = start >= 0 && end > start ? s.slice(start, end + 1) : s;
+    try {
+        const parsed = JSON.parse(slice);
+        if (parsed && typeof parsed === 'object') {
+            if (typeof parsed.result === 'string' && parsed.result.trim()) return parsed.result.trim();
+            if (typeof parsed.text === 'string' && parsed.text.trim()) return parsed.text.trim();
+            if (Array.isArray(parsed.tags)) return JSON.stringify({ tags: parsed.tags });
+            return slice;
+        }
+    } catch (_) {}
+    return s;
 }
 
 function defaultAgentCwd() {
@@ -1509,7 +1555,10 @@ function buildAgentMetadata(agent, finalize) {
         thinking: agent?.thinkingSummary ? healChatText(agent.thinkingSummary) : null,
         input_tokens: agent?.estimatedInputTokens || 0,
         output_tokens: agent?.estimatedOutputTokens || 0,
-        tokens_estimated: true,
+        context_tokens: agent?.contextTokens || 0,
+        model_loops: agent?.modelLoops || 0,
+        grok_cli_session_id: agent?._grokCliSessionId || null,
+        tokens_estimated: agent?._usageFromTurn ? false : true,
     };
     const media = mediaIngest.mediaForMetadata(agent);
     if (media && media.length) metadata.media = media;
@@ -1823,9 +1872,43 @@ function emitAgentError(agent, content, code) {
     return evt;
 }
 
+function ingestStreamUsage(agent, json) {
+    const usage = usageHarvest.normalizeUsage(usageHarvest.findUsage(json));
+    if (!usage) return;
+    agent.estimatedInputTokens = usage.input_tokens;
+    agent.estimatedOutputTokens = usage.output_tokens;
+    agent.modelLoops = usage.model_calls || agent.modelLoops || 0;
+    agent._usageFromTurn = true;
+    if (usage.total_tokens && usage.total_tokens < usageHarvest.CONTEXT_WINDOW_CAP) {
+        agent.contextTokens = usage.total_tokens;
+    }
+}
+
+function harvestAgentUsage(agent) {
+    try {
+        const row = usageHarvest.harvestAgent(agent, WORKSPACE);
+        if (row) {
+            log('info', 'usage', 'Harvested CLI session usage', {
+                session_id: agent.sessionId?.substring(0, 8),
+                grok_cli: row.id,
+                input: row.estimated_input_tokens,
+                output: row.estimated_output_tokens,
+                context: row.last_context_tokens,
+                estimated: row.tokens_estimated,
+            });
+            usageTrackerMem.at = 0;
+        }
+    } catch (err) {
+        log('warning', 'usage', `CLI usage harvest failed: ${err.message}`, {
+            session_id: agent.sessionId?.substring(0, 8),
+        });
+    }
+}
+
 function processGrokEvent(agent, json) {
     const t = json.type;
     const data = json.data || json.content || '';
+    ingestStreamUsage(agent, json);
 
     // Grok CLI auth / hard failures: {"type":"error","message":"Not signed in..."}
     if (t === 'error') {
@@ -2021,6 +2104,7 @@ function finalizeAgentClose(agent, code) {
             session_id: agent.sessionId?.substring(0, 8),
         });
     }
+    harvestAgentUsage(agent);
 
     const alreadyErrored = agent.events.some((e) => e.type === 'error');
     const exitCode = code != null ? code : (agent._exitCode != null ? agent._exitCode : 0);
@@ -2053,7 +2137,10 @@ function finalizeAgentClose(agent, code) {
             duration: Date.now() - agent.startTime,
             tools: agent.toolCount,
             model: agent.model,
-            tokens_estimated: true,
+            input_tokens: agent.estimatedInputTokens || 0,
+            output_tokens: agent.estimatedOutputTokens || 0,
+            context_tokens: agent.contextTokens || 0,
+            tokens_estimated: agent._usageFromTurn ? false : true,
             media: media || undefined,
         };
         agent.events.push(evt);
@@ -2451,9 +2538,160 @@ function peekGrokAuthStatus() {
     }
 }
 
+function runGrokComplete({ prompt, system, model, reasoningEffort, json, timeoutMs }) {
+    return new Promise(async (resolve) => {
+        const real = resolveCompleteModel(model);
+        const effort = resolveReasoningEffort(real, reasoningEffort, REASONING_EFFORT);
+        const sys = String(system || '').trim();
+        const user = String(prompt || '');
+        const fullPrompt = sys ? `${sys}\n\n${user}` : user;
+        if (!fullPrompt.trim()) {
+            resolve({ ok: false, error: 'empty_prompt' });
+            return;
+        }
+        let promptFile = null;
+        const args = [
+            '--output-format', json ? 'json' : 'plain',
+            '--always-approve',
+            '--disable-web-search',
+            '--no-subagents',
+            '--no-plan',
+            '--max-turns', '1',
+            '--reasoning-effort', effort,
+            '-m', real,
+        ];
+        if (json) {
+            args.push('--json-schema', JSON.stringify({
+                type: 'object',
+                properties: { tags: { type: 'array', items: { type: 'string' } } },
+                required: ['tags'],
+            }));
+        }
+        try {
+            if (shouldUsePromptFile(fullPrompt, 0)) {
+                promptFile = writePromptTextFile('discord-ai', fullPrompt);
+                args.push('--prompt-file', promptFile);
+            } else {
+                args.push('-p', fullPrompt);
+            }
+        } catch (err) {
+            resolve({ ok: false, error: err.message || 'prompt_file_failed' });
+            return;
+        }
+        let cwd = defaultAgentCwd();
+        try { cwd = await getAgentCwd(); } catch (_) {}
+        const env = { ...process.env, HOME: process.env.HOME || '/root' };
+        let proc;
+        try {
+            proc = spawn(GROK_BIN, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+        } catch (err) {
+            if (promptFile) try { fs.unlinkSync(promptFile); } catch (_) {}
+            resolve({ ok: false, error: err.message || 'spawn_failed' });
+            return;
+        }
+        let out = '';
+        let errOut = '';
+        proc.stdout.on('data', (d) => {
+            if (out.length < 800000) out += d.toString('utf8');
+        });
+        proc.stderr.on('data', (d) => {
+            if (errOut.length < 20000) errOut += d.toString('utf8');
+        });
+        const timer = setTimeout(() => {
+            try { proc.kill('SIGTERM'); } catch (_) {}
+        }, Math.max(15000, timeoutMs || 150000));
+        proc.on('close', (code) => {
+            clearTimeout(timer);
+            if (promptFile) try { fs.unlinkSync(promptFile); } catch (_) {}
+            const text = extractCompleteText(stripAnsi(out), !!json);
+            if (text) {
+                resolve({ ok: true, text, model: real, reasoning_effort: effort });
+                return;
+            }
+            const msg = stripAnsi(errOut).trim().slice(0, 180) || (`exit_${code}`);
+            resolve({ ok: false, error: msg, model: real, reasoning_effort: effort });
+        });
+        proc.on('error', (e) => {
+            clearTimeout(timer);
+            if (promptFile) try { fs.unlinkSync(promptFile); } catch (_) {}
+            resolve({ ok: false, error: e.message || 'spawn_failed' });
+        });
+    });
+}
+
+function hostTimeZone() {
+    const envTz = process.env.TZ || process.env.GROKIFY_USAGE_TZ;
+    if (envTz) return envTz;
+    try {
+        const tz = fs.readFileSync('/etc/timezone', 'utf8').trim();
+        if (tz) return tz;
+    } catch {
+        /* ignore */
+    }
+    return 'UTC';
+}
+
+function usageTrackerCacheFile() {
+    return path.join(WORKSPACE, 'storage', 'cache', 'usage-tracker.json');
+}
+
+function getUsageTracker(opts) {
+    const options = opts || {};
+    const ttlMs = 45000;
+    const force = !!options.refresh;
+    const cacheFile = usageTrackerCacheFile();
+    const cwdAllow = [defaultAgentCwd()];
+    const now = Date.now();
+    let sessions = null;
+    let scanned = usageTrackerMem.scanned || 0;
+    let parsed = 0;
+    let reused = 0;
+    if (!force && usageTrackerMem.sessions && (now - usageTrackerMem.at) < ttlMs) {
+        sessions = usageTrackerMem.sessions;
+        reused = Object.keys(sessions).length;
+    } else {
+        const cache = usageHarvest.loadCache(cacheFile);
+        const collected = usageHarvest.collect({
+            cwdAllow,
+            cache,
+            home: process.env.HOME || '/root',
+        });
+        sessions = collected.sessions;
+        scanned = collected.scanned;
+        parsed = collected.parsed;
+        reused = collected.reused;
+        if (collected.parsed > 0 || !fs.existsSync(cacheFile)) {
+            try { usageHarvest.saveCache(cacheFile, collected.sessions); } catch (_) {}
+        }
+        usageTrackerMem = { at: now, sessions, scanned };
+    }
+    const tracker = usageHarvest.aggregate(sessions, {
+        from: options.from || '',
+        to: options.to || '',
+        timeZone: hostTimeZone(),
+        includeRuns: !!options.includeRuns,
+    });
+    const out = {
+        ok: true,
+        source: 'grok-cli-sessions',
+        scanned,
+        parsed,
+        reused,
+        period_start: options.from || '',
+        period_end: options.to || '',
+        timezone: hostTimeZone(),
+        totals: tracker.totals,
+        daily: tracker.daily,
+        fetched_at: new Date().toISOString(),
+    };
+    if (options.includeRuns) out.runs = tracker.runs;
+    return out;
+}
+
 const httpServer = http.createServer((req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1');
     if (url.pathname === '/models' && req.method === 'GET') {
+        refreshGrokModelsIfStale();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
             grok_models: GROK_MODELS_FULL,
@@ -2461,6 +2699,35 @@ const httpServer = http.createServer((req, res) => {
             default_model: resolveGrokModel(null),
             default_reasoning_effort: defaultEffortForModel(DEFAULT_GROK_MODEL, REASONING_EFFORT),
         }));
+        return;
+    }
+    if (url.pathname === '/complete' && req.method === 'POST') {
+        readRequestBody(req, 512 * 1024)
+            .then(async (raw) => {
+                let body = {};
+                try {
+                    body = raw ? JSON.parse(raw) : {};
+                } catch {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: false, error: 'invalid_json' }));
+                    return;
+                }
+                const timeoutMs = Math.min(300000, Math.max(15000, parseInt(body.timeout_ms, 10) || 150000));
+                const result = await runGrokComplete({
+                    prompt: body.prompt || body.user || '',
+                    system: body.system || '',
+                    model: body.model || DEFAULT_GROK_MODEL,
+                    reasoningEffort: body.reasoning_effort || body.reasoningEffort || '',
+                    json: !!(body.json || body.response_format === 'json'),
+                    timeoutMs,
+                });
+                res.writeHead(result.ok ? 200 : 502, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(result));
+            })
+            .catch((err) => {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: err.message || 'complete_failed' }));
+            });
         return;
     }
     // Agent working directory (global): get / set / list children for picker
@@ -2509,6 +2776,22 @@ const httpServer = http.createServer((req, res) => {
         const result = listWorkDirEntries(listPath || undefined);
         res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
+        return;
+    }
+    if (url.pathname === '/usage-tracker' && req.method === 'GET') {
+        try {
+            const result = getUsageTracker({
+                from: url.searchParams.get('from') || '',
+                to: url.searchParams.get('to') || '',
+                refresh: url.searchParams.get('refresh') === '1',
+                includeRuns: url.searchParams.get('include_runs') === '1',
+            });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
+        } catch (err) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: err.message || 'tracker_failed' }));
+        }
         return;
     }
     if (url.pathname === '/health' && req.method === 'GET') {

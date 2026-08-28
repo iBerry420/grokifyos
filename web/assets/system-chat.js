@@ -1970,6 +1970,60 @@
     return '';
   }
 
+  function renderUsageTrackerHtml(tracker) {
+    if (!tracker || !tracker.ok || !tracker.totals) return '';
+    const t = tracker.totals;
+    const cell = (label, value) =>
+      '<div class="sc-usage-metric"><div class="sc-usage-metric-val">' +
+      escapeHtml(String(value || '0')) +
+      '</div><div class="sc-usage-metric-label">' + escapeHtml(label) + '</div></div>';
+    const dur = (n) => {
+      n = Number(n) || 0;
+      if (n < 60) return n + 's';
+      if (n < 3600) return Math.floor(n / 60) + 'm';
+      const h = n / 3600;
+      return (h < 10 ? h.toFixed(1).replace(/\.0$/, '') : String(Math.round(h))) + 'h';
+    };
+    const metrics =
+      '<div class="sc-usage-metrics">' +
+      cell('Sessions', t.agent_sessions) +
+      cell('Loops', t.model_loops) +
+      cell('Tools', t.tool_calls) +
+      cell('Messages', t.message_count) +
+      cell('Wall', tracker.label_wall || dur(t.wall_time_s)) +
+      cell('Model', dur(t.model_time_s)) +
+      cell('Context', tracker.label_context || fmtTokens(t.last_context_tokens)) +
+      cell('Est. in', tracker.label_input || fmtTokens(t.estimated_input_tokens)) +
+      cell('Est. out', tracker.label_output || fmtTokens(t.estimated_output_tokens)) +
+      '</div>';
+    const days = Array.isArray(tracker.daily) ? tracker.daily : [];
+    let chart = '';
+    if (days.length >= 2) {
+      const max = Math.max(1, ...days.map((d) => Number(d.estimated_input_tokens) || 0));
+      chart =
+        '<div class="sc-usage-chart">' +
+        days.map((d) => {
+          const v = Number(d.estimated_input_tokens) || 0;
+          const h = Math.max(v > 0 ? 8 : 0, Math.round((v / max) * 72));
+          const label = String(d.day || '').slice(5);
+          return (
+            '<div class="sc-usage-chart-col" title="' + escapeHtml(d.day || '') + '">' +
+              '<div class="sc-usage-chart-val">' + escapeHtml(fmtTokens(v)) + '</div>' +
+              '<div class="sc-usage-chart-bar"><span style="height:' + h + 'px"></span></div>' +
+              '<div class="sc-usage-chart-day">' + escapeHtml(label) + '</div>' +
+            '</div>'
+          );
+        }).join('') +
+        '</div>';
+    }
+    return (
+      '<div class="sc-usage-tracker">' +
+        '<div class="sc-usage-products-label">Agent activity</div>' +
+        metrics + chart +
+      '</div>'
+    );
+  }
+
   function usageProductName(raw) {
     switch (raw) {
       case 'GrokBuild': return 'Build';
@@ -2055,7 +2109,8 @@
       '</div>' +
       '<div class="sc-usage-bar ' + level + '"><span style="width:' + barW + '%"></span></div>' +
       '<div class="sc-usage-reset">' + escapeHtml(formatUsageReset(data.reset_at, true)) + '</div>' +
-      productsHtml;
+      productsHtml +
+      renderUsageTrackerHtml(data.tracker);
   }
 
   async function loadUsage(force) {
@@ -2080,7 +2135,14 @@
         return;
       }
       const pct = Number(data.usage_percent) || 0;
-      const label = formatUsagePercentLabel(pct) + ' used · ' + formatUsageReset(data.reset_at, false);
+      const tracker = data.tracker && data.tracker.ok ? data.tracker : null;
+      const chipParts = [formatUsagePercentLabel(pct) + ' used'];
+      if (tracker && tracker.label_wall) chipParts.push(tracker.label_wall);
+      if (tracker && tracker.label_input && tracker.label_input !== '0') {
+        chipParts.push(tracker.label_input + ' in');
+      }
+      chipParts.push(formatUsageReset(data.reset_at, false));
+      const label = chipParts.join(' · ');
       if (chip) {
         chip.textContent = label;
         chip.classList.toggle('sc-usage-warn', pct >= 70 && pct < 90);
@@ -2278,7 +2340,14 @@
     visibleSessions(data.sessions).forEach((s) => {
       const el = document.createElement('div');
       el.className = 'sc-session-item' + (s.id === currentSessionId ? ' active' : '');
-      el.innerHTML = '<span class="sc-title">' + esc(s.title) + '</span><button type="button" class="sc-del" title="Delete">×</button>';
+      const bits = [];
+      if (s.input_tokens) bits.push(fmtTokens(s.input_tokens) + ' in');
+      if (s.last_context_tokens) bits.push(fmtTokens(s.last_context_tokens) + ' ctx');
+      const meta = bits.length
+        ? '<span class="sc-session-meta">' + esc(bits.join(' · ')) + '</span>'
+        : '';
+      el.innerHTML = '<span class="sc-session-main"><span class="sc-title">' + esc(s.title) +
+        '</span>' + meta + '</span><button type="button" class="sc-del" title="Delete">×</button>';
       el.querySelector('.sc-title').onclick = () => switchSession(s.id, s.title);
       el.querySelector('.sc-del').onclick = (e) => {
         e.stopPropagation();

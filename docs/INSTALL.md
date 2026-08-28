@@ -238,6 +238,31 @@ Usage endpoints call xAI billing with that token. Missing auth → clear API err
 
 Default production path: `storage/grok-auth.json` (gitignored). Re-run the sync after every `grok login`.
 
+---
+
+## 6b. gbotd (Grok Bot inner app)
+
+The phone **Grok Bot** app is a control plane for the `gbot` CLI / `gbotd` daemon on the same host. PHP never exposes the daemon to the internet; it proxies `/api/gbot.php` to loopback.
+
+```env
+GROKIFY_GBOTD_URL=http://127.0.0.1:8780
+GROKIFY_GBOTD_TOKEN=contents-of-gbotd-token-file
+```
+
+Enable gbotd TCP on loopback (`gbotd install --tcp`, or the drop-in in `deploy/gbotd-http.conf.example`). Token file must be mode 0600 and ≥32 bytes. Put the **token value** in `php.env`, not the path.
+
+## 6c. Avalynn Discord (Discord inner app)
+
+The phone **Discord** app is a control plane for the Avalynn Discord backend on the same host (`avalynn-discord.service`, loopback `:4201`). PHP never exposes the backend password; it logs in server-side and proxies an allowlisted slice of `/api/discord/*`. List endpoints for the feed, users, guilds, channels, audits, and media read MariaDB directly so they stay fast (no Node `COUNT(*)` over millions of rows). Guilds/channels only attach bots that are live members (`GET /api/discord/bots/:id/guilds` from the running clients; REST when a bot is offline). Avatars live in Avalynn `uploads/audit-avatars` and are served (and cached from Discord CDN on miss) at `/api/discord.php?action=avatar`. Message attachments are downloaded on capture into `DISCORD_ATTACHMENT_DIR` (`uploads/discord-files`) and served at `/api/discord.php?action=file`. The phone never loads `cdn.discordapp.com` for media. Expired Discord CDN URLs return 404 instead of waiting on Discord. Guild-filtered audits need `GuildAuditEvent (guildId, createdAt)` (`GuildAuditEvent_guildId_createdAt_idx`). Audit event types are `eventAction` (not the `action=audits` dispatcher verb). Users can be scoped with `guildId` via `GuildMemberEvent`.
+
+```env
+GROKIFY_DISCORD_URL=http://127.0.0.1:4201
+GROKIFY_DISCORD_AVALYNN_USER_ID=1
+GROKIFY_AVALYNN_ENV=/var/www/avalynn/.env
+```
+
+`GROKIFY_DISCORD_PASSWORD` is optional — if unset, PHP reads `discord_backend_password` from the Avalynn settings table using credentials in `GROKIFY_AVALYNN_ENV`.
+
 ### Check / recover auth (CLI)
 
 When chat returns no reply after an agent dies, auth often expired. On the **server**:

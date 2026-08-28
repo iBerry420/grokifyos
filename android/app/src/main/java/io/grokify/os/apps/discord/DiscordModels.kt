@@ -117,6 +117,18 @@ internal fun discordFormatBotIdSet(ids: Set<Int>): String {
     return ids.sorted().joinToString(",")
 }
 
+/**
+ * Auto-tag is guild-wide: write the global row first, then every member bot so a
+ * leftover bot-specific GuildSettings row cannot keep the switch on after off.
+ */
+internal fun discordAutoTagPatchBotIds(memberBotIds: Collection<Int>): List<Int?> {
+    val members = memberBotIds.filter { it > 0 }.distinct()
+    return buildList {
+        add(null)
+        addAll(members)
+    }
+}
+
 internal const val DISCORD_DISCOGRAM_EXIT_WINDOW_MS = 2_000L
 
 internal const val DISCORD_IMAGE_ZOOM_EPS = 1.05f

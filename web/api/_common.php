@@ -8,7 +8,9 @@ if (session_status() === PHP_SESSION_ACTIVE) {
     session_write_close();
 }
 
-header('Content-Type: application/json; charset=utf-8');
+if (PHP_SAPI !== 'cli') {
+    header('Content-Type: application/json; charset=utf-8');
+}
 
 function gos_api_json(mixed $data, int $code = 200): never
 {

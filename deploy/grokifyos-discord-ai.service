@@ -1,0 +1,23 @@
+[Unit]
+Description=GrokifyOS Discord AI worker (tag + analyze jobs)
+After=network-online.target mysql.service mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/root/grokifyos
+EnvironmentFile=-/etc/grokifyos/php.env
+ExecStart=/usr/bin/php /root/grokifyos/scripts/discord-ai-worker.php --loop
+Restart=always
+RestartSec=4
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=20
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=grokifyos-discord-ai
+
+[Install]
+WantedBy=multi-user.target

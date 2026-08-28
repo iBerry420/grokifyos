@@ -4,7 +4,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import kotlin.random.Random
 
 class SpotifyDjDislikesTest {
     @Test
@@ -184,56 +183,4 @@ class SpotifyDjDislikesTest {
         assertEquals("song|artist", back[0].titleKey)
     }
 
-    @Test
-    fun pickResearch_alwaysIncludesEnabledCustom() {
-        val custom = DjPromptTemplate(
-            id = "custom_research_news",
-            kind = DjPromptKind.Research,
-            label = "USA news",
-            body = "NEWS: USA headlines this week. City: {{CITY}}.",
-            enabled = true,
-            builtIn = false,
-        )
-        val all = DjPromptDefaults.researchAngles() + custom
-        repeat(40) { seed ->
-            val picked = pickResearchTemplates(all, Random(seed.toLong()))
-            assertTrue(
-                "custom missing on seed=$seed picked=${picked.map { it.id }}",
-                picked.any { it.id == custom.id },
-            )
-        }
-    }
-
-    @Test
-    fun pickResearch_disabledCustomNotForced() {
-        val custom = DjPromptTemplate(
-            id = "custom_research_off",
-            kind = DjPromptKind.Research,
-            label = "Off news",
-            body = "NEWS: should not appear",
-            enabled = false,
-            builtIn = false,
-        )
-        val all = DjPromptDefaults.researchAngles() + custom
-        repeat(20) { seed ->
-            val picked = pickResearchTemplates(all, Random(seed.toLong()))
-            assertTrue(picked.none { it.id == custom.id })
-            assertTrue(picked.all { it.builtIn })
-        }
-    }
-
-    @Test
-    fun pickResearch_onlyCustomWhenBuiltInsOff() {
-        val custom = DjPromptTemplate(
-            id = "custom_only",
-            kind = DjPromptKind.Research,
-            label = "Only mine",
-            body = "CUSTOM: only this",
-            enabled = true,
-            builtIn = false,
-        )
-        val builtOff = DjPromptDefaults.researchAngles().map { it.copy(enabled = false) }
-        val picked = pickResearchTemplates(builtOff + custom, Random(1))
-        assertEquals(listOf("custom_only"), picked.map { it.id })
-    }
 }

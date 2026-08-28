@@ -11,9 +11,12 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
@@ -32,6 +35,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import io.grokify.os.apps.plugin.BuiltinPluginCatalog
+import io.grokify.os.apps.plugin.PluginFaviconImage
+import io.grokify.os.apps.plugin.PluginIconKey
 import io.grokify.os.ui.theme.GrokifyColors
 
 private const val CEXBOT_ORIGIN = "https://cexbot.grokpot.io/"
@@ -79,6 +85,12 @@ fun CexBotPane(
                     tint = GrokifyColors.TextPrimary,
                 )
             }
+            PluginFaviconImage(
+                pluginId = BuiltinPluginCatalog.CEXBOT,
+                fallback = PluginIconKey.CexBot,
+                modifier = Modifier.size(28.dp),
+            )
+            Spacer(Modifier.width(8.dp))
             Column(Modifier.weight(1f)) {
                 Text(
                     "CexBot",
@@ -102,7 +114,9 @@ fun CexBotPane(
         }
 
         AndroidView(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
             factory = { ctx ->
                 WebView(ctx).apply {
                     layoutParams = ViewGroup.LayoutParams(

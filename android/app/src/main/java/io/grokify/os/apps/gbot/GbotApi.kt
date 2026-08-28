@@ -22,6 +22,12 @@ class GbotApi(
 
     fun snapshot(): JSONObject = get("snapshot")
 
+    fun computers(): JSONObject = get("computers")
+
+    fun registerComputer(): JSONObject {
+        return post(JSONObject().put("action", "computers_register"))
+    }
+
     fun health(): JSONObject = get("health")
 
     fun pending(agentId: String? = null): JSONObject {

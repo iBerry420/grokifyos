@@ -177,6 +177,9 @@ Open the **phone** Android app → **Apps** tab. Every app is a **native host mo
 | **Spotify** | Lockscreen / media controls; **Live AI DJ** booth (banter, queue chat); research/build/edit playlists via host Grok Build; optional Grok Voice TTS | Notifications, Media session, mic (voice), network | **Spotify Client ID** (+ optional secret); **SpaceXAI API key** for Grok Voice (device TTS works without it) |
 | **SpaceXAI API Usage Analyzer** | Prepaid credit balance, period spend, soft/hard limits, 7‑day usage by model, balance history | Network | **SpaceXAI Management key** vault id `spacexai_management_key` (billing read on [management-api.x.ai](https://management-api.x.ai)) |
 | **Watch Deploy** | Dev tooling: download OTA `channel=wear` APK and install on a Galaxy Watch over **wireless ADB** (bundled `libadb.so`). One-tap **Update & install**. Data tab is a stub for future wear→phone payloads. | Network (phone + watch on same Wi‑Fi or phone hotspot); Wireless debugging on watch | Phone device token (for OTA download); no third-party vault key |
+| **CexBot** | Live trade desk WebView at cexbot.grokpot.io (same origin as the browser). Tokenized MCP connector on Settings (`/mcp/cex_mcp_…`) | Network | Desk login (not a vault key) |
+| **Grok Bot** | Full **gbot** / gbotd control plane: list/create/switch bots, chat + tail, pending approvals (local-tool / widget / secret / handback), computer VNC, host settings, MCP connect/refresh, raw gateway | Network (device token → `/api/gbot.php` → loopback gbotd) | Phone device token; server `GROKIFY_GBOTD_URL` + `GROKIFY_GBOTD_TOKEN` |
+| **Discord** | Avalynn Discord manager: markdown feed, local avatars/media, bots/selfbots only on guilds they are live members of, per-bot channel visibility, users/guilds/media/audits with guild filters, emoji, role pickers, captchas | Network (device token → `/api/discord.php`; lists hit MariaDB, writes proxy to avalynn-discord `:4201`) | Phone device token; Avalynn `discord_backend_password` (or `GROKIFY_DISCORD_PASSWORD`) |
 
 Capabilities are gated by Android permissions (Settings → Permissions, or in-chat `[[permission_request:…]]` cards). Keys live in **Settings → API key vault** on the device — never in git.
 
@@ -426,6 +429,133 @@ Issues and PRs welcome. Prefer small, focused changes. Keep secrets out of the t
 ## Changelog
 
 Android host versions (`versionName` / `versionCode` in `android/app/build.gradle.kts`). Wear and watch-face channels keep **independent** version streams (`android/wear`, `android/wear-face`). Newest first. OTA notes on the phone/watch come from `publish.sh --changelog`; this section is the longer human history.
+
+### 0.1.295 — Grok Bot connectors, full Bots pane, chat flicker
+
+**Phone host `0.1.295` (versionCode 295)** — Grok Bot inner app.
+
+- gbotd can add and use MCP connectors when instructed (`add-connector` workflow, `refreshMcp`, box MCP servers, listener connect URLs). Details shows connectors, listeners, and channels; **Add connector** runs the workflow in chat.
+- Chat no longer flips between an older tail and the current one: stale polls are dropped, earlier history is kept, and a failed agents list does not wipe the bot list.
+- **Bots** (and the other toolbar sheets) are full panes instead of a short popup. Android back / toolbar back pops Details → pane → chat, then leaves the inner app.
+
+### 0.1.294 — Discord media pane (no video crash)
+
+**Phone host `0.1.294` (versionCode 294)** — Discord inner app.
+
+- Videos no longer play inside scrolling lists (that crashed the host). Tap a clip to open a full-screen player with ExoPlayer, HTTP range, and an error state instead of a native crash.
+- Media pane shows origin meta: user, Discord id, guild, channel, timestamp, size, and ids. Images and GIFs pinch-zoom and pan (double-tap to reset).
+
+### 0.1.293 — Grok Bot automation schedule + prompt edit
+
+**Phone host `0.1.293` (versionCode 293)** — Grok Bot inner app.
+
+- Automations sheet can set frequency (5m–daily) and hours (**24 hours**, **8–21**, **9–17**, or a custom from/to). Cron is saved through gbotd `updateAgentAutomation`.
+- Prompt: **Copy** and **Edit**. Hours use the bot timezone (Setup override).
+
+### 0.1.292 — Discord user profiles
+
+**Phone host `0.1.292` (versionCode 292)** — Discord inner app.
+
+- Tap a username or avatar in Feed, Users, or Audits to open a profile sheet.
+- Profile shows active guilds and channels, username / display-name / avatar history, message count, a semantic tag chart when tags exist, and paginated messages with markdown and media.
+
+### 0.1.291 — Discord audit deleted media
+
+**Phone host `0.1.291` (versionCode 291)** — Discord inner app.
+
+- Delete/edit audit cards show cached images, GIFs, video, and files from the original message (including media-only deletes that had no text).
+- Snowflake Discord attachment ids are mapped onto local `MessageAttachment` rows so the phone loads our file endpoint instead of an expired CDN URL.
+
+### 0.1.290 — Discord audit event content
+
+**Phone host `0.1.290` (versionCode 290)** — Discord inner app.
+
+- Audits now include stored before/after payloads: deleted message text, edit diffs, role names, and every historical avatar / username / display-name / nickname change (not capped at 2).
+- Avatar events show the archived before and after images from `audit-avatars`; message events keep local attachments.
+
+### 0.1.289 — Discord audits feed + users guild filter
+
+**Phone host `0.1.289` (versionCode 289)** — Discord inner app.
+
+- Audits were empty because `?action=audits` was applied as a GuildAuditEvent action filter. Event types now use `eventAction`.
+- Users has the same searchable guild filter as Media/Audits (recent members, or username/id search inside that guild).
+
+### 0.1.288 — Discord live guild membership + capture-time media
+
+**Phone host `0.1.288` (versionCode 288)** — Discord inner app.
+
+- Guild bot lists come from the live Discord clients (and REST when a bot is offline), not leftover audit/settings rows. GROK COMMUNITY / GREYCORD / Suno are LYNX-only; Cat's Cafe is AvalynnAI-only; AvalynnAI NG (offline) is on no guilds.
+- Attachments are downloaded when messages are captured (`DISCORD_ATTACHMENT_DIR`) and served from GrokifyOS. The phone never plays `cdn.discordapp.com` URLs.
+
+### 0.1.287 — Discord guild membership, media/audit guild filters
+
+**Phone host `0.1.287` (versionCode 287)** — Discord inner app.
+
+- Guilds and channel toggles only list bots that actually have data in that guild (LYNX / AvalynnAI / NG are no longer copied onto every server).
+- Media and Audits have their own searchable guild filters (independent of the Feed guild). Media grid is thumbnails only; tap to play GIFs/video/audio. Expired Discord CDN links 404 immediately instead of hanging.
+- Guild-filtered audits use a `(guildId, createdAt)` index instead of scanning millions of rows.
+
+### 0.1.286 — Discord avatars, media, and list speed
+
+**Phone host `0.1.286` (versionCode 286)** — Discord inner app.
+
+- Avatars and attachments are served from the GrokifyOS API (`/api/discord.php?action=avatar|file`) with on-demand Discord CDN cache. Bots already store avatars on ingest (`uploads/audit-avatars`); missing files are cached on first view. Attachments that were never saved locally are cached into `uploads/discord-files` when opened.
+- Feed, users, guilds, channels, audits, and media lists query MariaDB directly (no Node `COUNT(*)` over millions of rows). Users/guilds/audits have filter + sort chips. Expanding a guild loads **that** guild’s channels with a per-bot visibility toggle.
+- Feed renders Discord markdown (bold/italic/code plus mentions/emoji/spoilers) and plays GIFs, video, audio, and other attachments.
+
+### 0.1.285 — Discord inner app
+
+**Phone host `0.1.285` (versionCode 285)** — Discord manager inner app.
+
+- New **Apps → Discord** host module. Same void/cyan theme as the rest of the phone. Tabs: Feed, Bots, Guilds, Users, Media, Roles, Captchas, Emoji, Audits.
+- Phone talks to `/api/discord.php` (device Bearer). PHP allowlists paths and proxies to local **avalynn-discord** (`127.0.0.1:4201`). Captured emoji files are served from Avalynn `uploads/emojis`. Avalynn.ai itself is unchanged.
+
+### 0.1.284 — Grok Bot automations sheet + stale-alert fix
+
+**Phone host `0.1.284` (versionCode 284)** — Grok Bot inner app.
+
+- Background alerts no longer quote the newest chat line unless that entry appeared during the run. Start/idle notices stay on status, not an old preview.
+- Toolbar **Autos** chip next to **Bots**: schedule, last/next run, prompt, run history, on/off, run now.
+
+### 0.1.282 — Grok Bot multiline + automation alerts
+
+**Phone host `0.1.282` (versionCode 282)** — Grok Bot inner app.
+
+- Composer: **Enter inserts a newline**. Send is the cyan button only.
+- Background alerts (on by default, Setup toggle): notify when an automation starts, finishes, or needs approval. Tap opens **Apps → Grok Bot**. Snapshot now includes slim `listAllAutomations` (no prompts).
+
+### 0.1.281 — Grok Bot chat UI, inbox, VNC
+
+**Phone host `0.1.281` (versionCode 281)** — Grok Bot inner app polish.
+
+- Chat-first layout matching System Chat (YOU/bot bubbles, markdown, timestamps, composer, stick-to-bottom). Bots / Inbox / Computer / Setup are toolbar sheets.
+- Inbox no longer shuffles: pending cards are keyed by agent+entry, enrichment does not cross bots that share `t1s3`-style ids, and poll merges keep order plus already-loaded prompts.
+- Computer (noVNC) stamps `network_token` on every same-host asset request so CSS/JS/SVG stop 404ing. Autoconnect, scale, on-screen keyboard.
+
+### 0.1.280 — Grok Bot inner app (gbot)
+
+**Phone host `0.1.280` (versionCode 280)** — Grok Bot inner app.
+
+- New **Apps → Grok Bot** host module. The phone talks to `/api/gbot.php` (device Bearer); PHP proxies to local **gbotd** (loopback HTTP or UDS). Same surface as the `gbot` CLI: bots, send/tail, pending approve/deny/answer/dismiss/secret, box ensure/VNC/handback, settings, MCP, transcript search, workflows/skills, `gbot login`, raw gateway.
+- Server: `GROKIFY_GBOTD_URL` + `GROKIFY_GBOTD_TOKEN` (see `.env.example` and `deploy/gbotd-http.conf.example`). Nuclear gbotd methods stay blocked in PHP.
+
+### 0.1.275 — Live DJ: skip no longer waits on queue refill
+
+**Phone host `0.1.275` (versionCode 275)** — Spotify Live DJ inner app.
+
+- Skip with a short UP NEXT (e.g. 3 songs) held the **transition** lock while the booth crawled Spotify + asked Grok to rank more cuts. Further skips were ignored until that fill finished.
+- Skip / hard-skip / queue jump now play the next already-queued cut first. Refill runs **after** the lock drops. Status may show **filling** — Skip still works.
+- Empty list is the only case that waits on a fill, and a double-tap abort can cancel that wait.
+
+### 0.1.274 — Live DJ: research angles share one lottery
+
+**Phone host `0.1.274` (versionCode 274)** — Spotify Live DJ inner app.
+
+- Custom research (and custom banter bits) were **forced every talk**, so toggling more built-in angles never rotated the pack.
+- Enabled research angles — built-in + custom — now sit in **one lottery**. Each talk draws **1–3**, preferring ones you have not heard recently. Off stays out.
+- Banter bits: track handoff stays on; other bits (including custom) rotate. A custom news angle is required on-air **only when it was drawn this cycle**.
+- Research JSON fields follow the drawn pack (lyrics-only no longer also dumps album/artist facts).
+- Booth chat, queue-rank, and behavior still use the saved templates as written (one active behavior; no lottery there).
 
 ### 0.1.273 — Live DJ: custom banter no longer replaced by the canned fallback
 

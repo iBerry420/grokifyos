@@ -7,8 +7,10 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.ClippingMediaSource
+import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.extractor.DefaultExtractorsFactory
 import java.io.File
@@ -39,14 +41,61 @@ class LyrePlayer(context: Context) {
         dataSource,
         DefaultExtractorsFactory().setConstantBitrateSeekingEnabled(true),
     )
-    val exo: ExoPlayer = ExoPlayer.Builder(appCtx).build()
+    private val pool: Array<ExoPlayer> = arrayOf(createPlayer(0), createPlayer(1))
+    private var frontIndex = 0
+
+    val exo: ExoPlayer get() = pool[frontIndex]
+    private val ram: ExoPlayer get() = pool[1 - frontIndex]
+
+    @Volatile
+    var wantedPlaying: Boolean = false
+        private set
+
+    @Volatile
+    var playGeneration: Int = 0
+        private set
+
+    @Volatile
+    var swapEpoch: Int = 0
+        private set
+
+    @Volatile
+    private var seekTargetId: String? = null
+
+    @Volatile
+    private var ramTargetId: String? = null
 
     var items: List<LyrePlayItem> = emptyList()
         private set
 
-    fun setProgram(program: List<LyrePlayItem>) {
-        items = program
-        val media = program.map { item ->
+    private fun createPlayer(slot: Int): ExoPlayer {
+        val load = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(5_000, 30_000, 250, 500)
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .build()
+        return ExoPlayer.Builder(appCtx).setLoadControl(load).build().apply {
+            pauseAtEndOfMediaItems = true
+            playWhenReady = false
+            repeatMode = Player.REPEAT_MODE_OFF
+            setPreloadConfiguration(ExoPlayer.PreloadConfiguration(4_000_000L))
+            addListener(object : Player.Listener {
+                override fun onIsPlayingChanged(isPlaying: Boolean) {
+                    val front = slot == frontIndex
+                    if (isPlaying && front && !wantedPlaying) {
+                        playWhenReady = false
+                        pause()
+                    }
+                    if (isPlaying && !front) {
+                        playWhenReady = false
+                        pause()
+                    }
+                }
+            })
+        }
+    }
+
+    private fun mediaOf(program: List<LyrePlayItem>): List<MediaSource> {
+        return program.map { item ->
             val base = sources.createMediaSource(MediaItem.fromUri(Uri.fromFile(item.file)))
             val end = item.endUs
             when {
@@ -55,14 +104,68 @@ class LyrePlayer(context: Context) {
                 else -> base
             }
         }
-        exo.repeatMode = Player.REPEAT_MODE_OFF
-        exo.playWhenReady = false
-        if (media.isEmpty()) {
-            exo.clearMediaItems()
-        } else {
-            exo.setMediaSources(media)
-            exo.prepare()
+    }
+
+    fun setProgram(program: List<LyrePlayItem>) {
+        items = program
+        wantedPlaying = false
+        seekTargetId = null
+        ramTargetId = null
+        frontIndex = 0
+        swapEpoch += 1
+        for (player in pool) {
+            player.repeatMode = Player.REPEAT_MODE_OFF
+            player.pauseAtEndOfMediaItems = true
+            player.playWhenReady = false
+            player.pause()
+            val media = mediaOf(program)
+            if (media.isEmpty()) {
+                player.clearMediaItems()
+            } else {
+                player.setMediaSources(media)
+                player.prepare()
+            }
         }
+    }
+
+    fun preloadItem(id: String): Boolean {
+        val idx = items.indexOfFirst { it.id == id }
+        if (idx < 0) return false
+        if (ramTargetId == id && ram.currentMediaItemIndex == idx) {
+            if (ram.playbackState == Player.STATE_IDLE) ram.prepare()
+            return true
+        }
+        ramTargetId = id
+        ram.playWhenReady = false
+        ram.pause()
+        ram.seekTo(idx, 0L)
+        if (ram.playbackState == Player.STATE_IDLE) ram.prepare()
+        return true
+    }
+
+    fun ramItemId(): String? = ramTargetId
+
+    fun ramReady(id: String): Boolean {
+        if (id.isEmpty() || ramTargetId != id) return false
+        val idx = items.indexOfFirst { it.id == id }
+        if (idx < 0) return false
+        return ram.currentMediaItemIndex == idx && ram.playbackState == Player.STATE_READY
+    }
+
+    fun promoteRam(id: String): Boolean {
+        if (!ramReady(id)) return false
+        val old = exo
+        old.playWhenReady = false
+        old.pause()
+        frontIndex = 1 - frontIndex
+        ramTargetId = null
+        seekTargetId = id
+        swapEpoch += 1
+        if (wantedPlaying) {
+            exo.playWhenReady = true
+            exo.play()
+        }
+        return true
     }
 
     fun seekToItem(id: String, positionSec: Double): Boolean {
@@ -71,18 +174,48 @@ class LyrePlayer(context: Context) {
         val item = items[idx]
         val maxMs = (item.playDurationSec * 1000.0).toLong().coerceAtLeast(0L)
         val ms = (positionSec * 1000.0).toLong().coerceIn(0L, maxMs)
+        seekTargetId = id
         exo.seekTo(idx, ms)
         return true
     }
 
-    fun play() {
+    fun seekPending(targetId: String): Boolean {
+        return seekTargetId == targetId && currentItem()?.id != targetId
+    }
+
+    fun play(generation: Int = playGeneration) {
+        if (generation != playGeneration) {
+            wantedPlaying = false
+            exo.playWhenReady = false
+            exo.pause()
+            return
+        }
+        wantedPlaying = true
         exo.playWhenReady = true
         exo.play()
     }
 
     fun pause() {
+        wantedPlaying = false
         exo.playWhenReady = false
         exo.pause()
+    }
+
+    fun invalidatePlay() {
+        playGeneration += 1
+        pause()
+    }
+
+    fun prepared(): Boolean {
+        return exo.playbackState == Player.STATE_READY
+    }
+
+    fun ended(): Boolean {
+        return LyreTransport.playerEnded(
+            currentItem(),
+            exo.currentPosition / 1000.0,
+            exo.playbackState == Player.STATE_ENDED,
+        )
     }
 
     fun syncLoop(loopClip: Boolean, leftoverClipId: String?) {
@@ -101,8 +234,11 @@ class LyrePlayer(context: Context) {
     fun currentItem(): LyrePlayItem? = items.getOrNull(exo.currentMediaItemIndex)
 
     fun release() {
-        runCatching { exo.release() }
+        for (player in pool) {
+            runCatching { player.release() }
+        }
         items = emptyList()
+        ramTargetId = null
     }
 
     companion object {

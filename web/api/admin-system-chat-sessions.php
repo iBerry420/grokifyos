@@ -18,8 +18,17 @@ if ($method === 'GET') {
     );
     $st->execute([$userId]);
     $sessions = $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    $stats = gos_usage_chat_session_stats($userId, false);
     foreach ($sessions as &$row) {
         $row['message_count'] = (int) ($row['message_count'] ?? 0);
+        $sid = (string) ($row['id'] ?? '');
+        $u = $stats[$sid] ?? null;
+        $row['input_tokens'] = (int) ($u['input_tokens'] ?? 0);
+        $row['output_tokens'] = (int) ($u['output_tokens'] ?? 0);
+        $row['last_context_tokens'] = (int) ($u['last_context_tokens'] ?? 0);
+        $row['wall_time_s'] = (int) ($u['wall_time_s'] ?? 0);
+        $row['tool_calls'] = (int) ($u['tool_calls'] ?? 0);
+        $row['tokens_estimated'] = !empty($u['tokens_estimated']);
     }
     unset($row);
     gos_api_json(['ok' => true, 'sessions' => $sessions]);

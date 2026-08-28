@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+define('GOS_SKIP_SESSION', true);
+
 require_once dirname(__DIR__) . '/includes/bootstrap.php';
 
 $channel = function_exists('gos_apk_channel')
@@ -31,12 +33,26 @@ if ($path === '' || !is_readable($path)) {
     }
 }
 
+clearstatcache(true, $path);
 $name = (string) ($apk['file_name'] ?? 'grokifyos.apk');
-$size = (int) ($apk['file_size'] ?? filesize($path));
+$size = (int) filesize($path);
+$sha = hash_file('sha256', $path);
+if ($size < 1 || $sha === false) {
+    http_response_code(404);
+    header('Content-Type: text/plain; charset=utf-8');
+    echo 'APK file missing on disk.';
+    exit;
+}
+
+while (ob_get_level() > 0) {
+    ob_end_clean();
+}
 
 header('Content-Type: application/vnd.android.package-archive');
 header('Content-Disposition: attachment; filename="' . str_replace('"', '', $name) . '"');
 header('Content-Length: ' . $size);
-header('Cache-Control: private, no-cache');
+header('Content-Encoding: identity');
+header('Cache-Control: private, no-cache, no-store, no-transform');
+header('X-Checksum-SHA256: ' . $sha);
 readfile($path);
 exit;

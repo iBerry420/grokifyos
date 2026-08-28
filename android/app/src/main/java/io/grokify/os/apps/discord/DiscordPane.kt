@@ -1016,10 +1016,10 @@ fun DiscordPane(onBack: () -> Unit) {
         respondToMentions: Boolean? = null,
         semanticTagging: Boolean? = null,
     ) {
-        // Auto-tag is guild-wide. Patching selected bots used to INSERT rows with
-        // isWatched=false and drop the guild from the watched list.
+        // Auto-tag is guild-wide. Writes used to hit only botId=null, so a leftover
+        // bot row kept semanticTagging=1 and the switch snapped back on after refresh.
         val ids = if (semanticTagging != null && isWatched == null && respondToMentions == null) {
-            listOf<Int?>(null)
+            discordAutoTagPatchBotIds(g.bots.map { it.botId })
         } else {
             guildPatchBots(g)
         }
@@ -1431,12 +1431,7 @@ fun DiscordPane(onBack: () -> Unit) {
                         onAutoTag = { g, on ->
                             runOp(if (on) "Auto tagging on" else "Auto tagging off") {
                                 patchGuild(g, semanticTagging = on)
-                                val updated = g.copy(
-                                    semanticTagging = on,
-                                    bots = g.bots.map { it.copy(semanticTagging = on) },
-                                )
-                                loadGuilds(retainIfMissing = updated)
-                                guilds = guilds.map { if (it.guildId == g.guildId) it.copy(semanticTagging = on) else it }
+                                loadGuilds()
                             }
                         },
                         onOpenFeed = { id ->

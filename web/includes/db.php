@@ -2,13 +2,26 @@
 
 declare(strict_types=1);
 
+function gos_pdo_alive(?PDO $pdo): bool
+{
+    if (!($pdo instanceof PDO)) {
+        return false;
+    }
+    try {
+        return $pdo->query('SELECT 1') !== false;
+    } catch (Throwable) {
+        return false;
+    }
+}
+
 function gos_pdo(): PDO
 {
     /** @var PDO|null $pdo */
     static $pdo = null;
-    if ($pdo instanceof PDO) {
+    if (gos_pdo_alive($pdo)) {
         return $pdo;
     }
+    $pdo = null;
     $c = require __DIR__ . '/settings.php';
     $dsn = sprintf(
         'mysql:host=%s;port=%d;dbname=%s;charset=%s',

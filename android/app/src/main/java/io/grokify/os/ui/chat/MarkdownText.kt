@@ -61,7 +61,10 @@ fun MarkdownText(
     modifier: Modifier = Modifier,
     textColor: Color = Color(0xFFE5E7EB),
 ) {
-    val blocks = remember(markdown) { parseBlocks(normalizeChatMarkdown(markdown)) }
+    val blocks = remember(markdown) {
+        runCatching { parseBlocks(normalizeChatMarkdown(markdown)) }
+            .getOrElse { listOf(MdBlock.Paragraph(markdown)) }
+    }
     SelectionContainer {
         Column(modifier = modifier) {
             blocks.forEach { block ->
@@ -619,8 +622,17 @@ private fun parseBlocks(src: String): List<MdBlock> {
             }
             line.matches(Regex("^\\s*\\d+\\.\\s+.+")) -> {
                 flushPara()
-                val m = Regex("^\\s*(\\d+)\\.\\s+(.*)").find(line)!!
-                out += MdBlock.ListItem(m.groupValues[2], ordered = true, index = m.groupValues[1].toInt())
+                val m = Regex("^\\s*(\\d+)\\.\\s+(.*)").find(line)
+                if (m != null) {
+                    out += MdBlock.ListItem(
+                        m.groupValues[2],
+                        ordered = true,
+                        index = m.groupValues[1].toIntOrNull() ?: 1,
+                    )
+                } else {
+                    if (para.isNotEmpty()) para.append('\n')
+                    para.append(line)
+                }
             }
             line.startsWith("> ") || line == ">" -> {
                 flushPara()

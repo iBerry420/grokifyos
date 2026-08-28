@@ -1,33 +1,23 @@
 package io.grokify.os.apps.lyre.ui
 
+import android.net.Uri
+import android.os.SystemClock
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
@@ -43,11 +33,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -59,26 +50,50 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.ui.PlayerView
-import coil.compose.AsyncImage
 import io.grokify.os.apps.lyre.BoardData
 import io.grokify.os.apps.lyre.Frame
 import io.grokify.os.apps.lyre.LayerClip
+import io.grokify.os.apps.lyre.LyreActivity
+import io.grokify.os.apps.lyre.LyreActivityLine
+import io.grokify.os.apps.lyre.LyreApi
+import io.grokify.os.apps.lyre.LyreAudioEngine
+import io.grokify.os.apps.lyre.LyreBoardCodec
 import io.grokify.os.apps.lyre.LyreCache
 import io.grokify.os.apps.lyre.LyreClip
 import io.grokify.os.apps.lyre.LyreClockTarget
-import io.grokify.os.apps.lyre.LyreMovie
+import io.grokify.os.apps.lyre.LyreEdits
+import io.grokify.os.apps.lyre.LyreEnvelope
+import io.grokify.os.apps.lyre.LyreImagine
+import io.grokify.os.apps.lyre.LyreImagineClient
+import io.grokify.os.apps.lyre.LyreImagineJob
+import io.grokify.os.apps.lyre.LyreImagineMode
+import io.grokify.os.apps.plugin.HostApiKeyStore
+import io.grokify.os.data.ApiKeyIds
 import io.grokify.os.apps.lyre.LyrePlayItem
 import io.grokify.os.apps.lyre.LyrePlayer
+import io.grokify.os.apps.lyre.LyrePreview
+import io.grokify.os.apps.lyre.LyreStorageKeys
 import io.grokify.os.apps.lyre.LyreStore
-import io.grokify.os.apps.lyre.StoryboardClip
+import io.grokify.os.apps.lyre.LyreTransport
+import io.grokify.os.apps.lyre.LyreUploads
+import io.grokify.os.apps.lyre.LyreWaveformDecoder
+import io.grokify.os.apps.lyre.MediaLayer
 import io.grokify.os.apps.lyre.lyreClockTarget
-import io.grokify.os.apps.lyre.lyreNextVideoClip
-import io.grokify.os.apps.lyre.lyreStillsFromPlayItem
+import io.grokify.os.apps.lyre.lyreJumpTime
 import io.grokify.os.ui.theme.GrokifyColors
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
 private val CHIPS = listOf(
@@ -88,116 +103,857 @@ private val CHIPS = listOf(
     "activity" to "Activity",
 )
 
+private sealed class TrackMenu {
+    data class Still(val frame: Frame) : TrackMenu()
+    data class Video(val clip: LayerClip, val locked: Boolean) : TrackMenu()
+    data class Audio(val layer: MediaLayer, val clip: LayerClip) : TrackMenu()
+    data class Library(val item: LyreLibraryItem) : TrackMenu()
+    data class PickScene(val item: LyreLibraryItem) : TrackMenu()
+    data object InsertLibrary : TrackMenu()
+}
+
 @Composable
 fun LyreEditor(
     board: BoardData,
     boardId: String,
     cache: LyreCache,
     store: LyreStore,
+    api: LyreApi,
     onBack: () -> Unit,
+    onBoardChange: (BoardData) -> Unit = {},
 ) {
     val context = LocalContext.current
     val player = remember { LyrePlayer(context.applicationContext) }
+    val audio = remember { LyreAudioEngine(context.applicationContext) }
     val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(player, lifecycleOwner) {
+    val scope = rememberCoroutineScope()
+    DisposableEffect(player, audio, lifecycleOwner) {
         val obs = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) player.pause()
+            if (event == Lifecycle.Event.ON_STOP) {
+                player.pause()
+                audio.pause()
+            }
         }
         lifecycleOwner.lifecycle.addObserver(obs)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(obs)
             player.release()
+            audio.release()
         }
     }
 
-    val storyboard = remember(board) { LyreClip.movieClips(board.scenes) }
-    val duration = remember(storyboard) { storyboard.sumOf { it.length }.toFloat() }
-    val programLayers = remember(board) { LyreMovie.movieProgramLayers(board.movie, board.videoLayers) }
+    var live by remember { mutableStateOf(board) }
+    LaunchedEffect(board) { live = board }
+
+    val storyboard = remember(live) { LyreClip.movieClips(live.scenes) }
+    val duration = remember(live) { LyreStorageKeys.timelineDuration(live).toFloat() }
+    val pictureClips = remember(live) { LyreEdits.pictureVideoClips(live) }
 
     var playhead by remember { mutableFloatStateOf(store.playhead.coerceAtLeast(0f)) }
     var playing by remember { mutableStateOf(false) }
-    var chip by remember { mutableStateOf(store.chip.ifBlank { "scenes" }) }
+    var chip by remember { mutableStateOf("") }
     var museOpen by remember { mutableStateOf(store.museOpen) }
     var switcher by remember { mutableStateOf(false) }
     var stills by remember { mutableStateOf<Map<String, File>>(emptyMap()) }
     var program by remember { mutableStateOf<List<LyrePlayItem>>(emptyList()) }
     var onHold by remember { mutableStateOf(false) }
+    var activityTick by remember { mutableStateOf(0) }
+    var pps by remember { mutableFloatStateOf(store.timelinePps) }
+    var menu by remember { mutableStateOf<TrackMenu?>(null) }
+    var imagine by remember { mutableStateOf<LyreImagineJob?>(null) }
+    var genStatus by remember { mutableStateOf<String?>(null) }
+    var genBusy by remember { mutableStateOf(false) }
+    var extraRefFiles by remember { mutableStateOf<List<File>>(emptyList()) }
+    var scrubbing by remember { mutableStateOf(false) }
+    val activity = remember(boardId) { LyreActivity(cache.activityFile(boardId)) }
+    var saveJob by remember { mutableStateOf<Job?>(null) }
+    val playEpoch = remember { AtomicInteger(0) }
+    val liveRef = rememberUpdatedState(live)
+    val stillsRef = rememberUpdatedState(stills)
+    val durationRef = rememberUpdatedState(duration)
 
-    LaunchedEffect(board, boardId) {
-        val resolved = withContext(Dispatchers.IO) {
-            val keys = board.scenes.flatMap { sc -> sc.frames.map { it.src } }
-                .filter { it.isNotEmpty() }
-                .distinct()
-            val map = HashMap<String, File>(keys.size)
-            for (key in keys) {
-                val f = cache.resolve(boardId, key)
-                if (f != null && f.length() > 0L) map[key] = f
+    fun logActivity(
+        type: String,
+        summary: String,
+        sceneId: String? = null,
+        frameId: String? = null,
+        clipId: String? = null,
+    ) {
+        activity.append(
+            LyreActivityLine(
+                ts = System.currentTimeMillis(),
+                type = type,
+                projectId = store.projectId,
+                sceneId = sceneId,
+                frameId = frameId,
+                clipId = clipId,
+                summary = summary,
+            ),
+        )
+        activityTick++
+    }
+
+    fun commit(next: BoardData, summary: String, type: String = "edit") {
+        live = next
+        onBoardChange(next)
+        logActivity(type, summary)
+        saveJob?.cancel()
+        saveJob = scope.launch {
+            delay(700)
+            withContext(Dispatchers.IO) {
+                val json = LyreBoardCodec.encode(next)
+                cache.writeBoardJson(boardId, json)
+                api.saveBoard(store.projectId, json)
             }
-            map to LyrePlayer.buildProgram(board, boardId, cache)
-        }
-        stills = resolved.first
-        program = resolved.second
-        player.setProgram(resolved.second)
-        val t = playhead.coerceIn(0f, duration.coerceAtLeast(0f))
-        playhead = t
-        applyClock(board, player, t.toDouble(), resume = false, loopClip = store.loopClip) { hold ->
-            onHold = hold
-            playing = false
         }
     }
 
-    LaunchedEffect(playing, program, board) {
-        if (!playing) return@LaunchedEffect
-        while (isActive) {
-            val item = player.currentItem()
-            if (item != null && !onHold) {
-                val pos = player.exo.currentPosition / 1000.0
-                val t = lyreStillsFromPlayItem(board, item, pos).toFloat()
-                playhead = t
-                store.playhead = t
-                val leftoverId = (lyreClockTarget(board, t.toDouble()) as? LyreClockTarget.Leftover)?.clipId
-                player.syncLoop(store.loopClip, leftoverId)
+    LaunchedEffect(boardId) {
+        logActivity("open", "Opened ${live.title.ifBlank { "Untitled" }}")
+    }
+
+    LaunchedEffect(boardId) {
+        withContext(Dispatchers.IO) {
+            activity.seedFromBoardIfEmpty(live, store.projectId)
+        }
+        val map = ConcurrentHashMap<String, File>()
+        stills.forEach { (k, v) -> map[k] = v }
+        val imgSem = Semaphore(8)
+        val audSem = Semaphore(2)
+        suspend fun pull(keys: List<String>, sem: Semaphore) {
+            coroutineScope {
+                keys.map { key ->
+                    async(Dispatchers.IO) {
+                        if (LyreStorageKeys.file(map, key) != null) return@async
+                        sem.withPermit {
+                            val f = cache.resolve(boardId, key) ?: return@withPermit
+                            LyreStorageKeys.index(map, key, f)
+                            val snap = HashMap(map)
+                            withContext(Dispatchers.Main) { stills = snap }
+                        }
+                    }
+                }.awaitAll()
             }
-            if (!player.exo.isPlaying && !player.exo.playWhenReady) {
-                playing = false
-                store.playhead = playhead
-                break
-            }
-            delay(80)
+        }
+        snapshotFlow {
+            LyreStorageKeys.imageKeys(live) to LyreStorageKeys.audioKeys(live)
+        }.collect { (images, audios) ->
+            pull(images, imgSem)
+            pull(audios, audSem)
         }
     }
 
-    val current = LyreClip.clipAtTime(storyboard, playhead.toDouble())
-    val showStill = onHold || program.isEmpty() || when (val target = lyreClockTarget(board, playhead.toDouble())) {
-        is LyreClockTarget.Movie -> program.none { it.id == "lc_movie" }
-        is LyreClockTarget.Leftover -> program.none { it.id == target.clipId }
-        is LyreClockTarget.Hold -> true
-        null -> true
+    val videoSig = remember(live) {
+        buildString {
+            append(live.movie?.src.orEmpty())
+            live.movie?.parts?.forEach { part ->
+                append('#').append(part.clipId)
+            }
+            live.videoLayers.forEach { layer ->
+                layer.clips.forEach { clip ->
+                    append('|').append(clip.id).append(':').append(clip.src)
+                }
+            }
+        }
+    }
+    LaunchedEffect(boardId, videoSig) {
+        val built = withContext(Dispatchers.IO) { LyrePlayer.buildProgram(live, boardId, cache) }
+        val same = built.size == program.size && built.zip(program).all { (a, b) ->
+            a.id == b.id && a.file.absolutePath == b.file.absolutePath
+        }
+        if (!same) {
+            program = built
+            player.setProgram(built)
+        }
+    }
+
+    LaunchedEffect(boardId, stills.size) {
+        if (stills.isEmpty()) return@LaunchedEffect
+        val (waved, filled) = withContext(Dispatchers.IO) { LyreWaveformDecoder.fillMissing(live, stills) }
+        if (filled <= 0) return@LaunchedEffect
+        live = waved
+        onBoardChange(waved)
+        withContext(Dispatchers.IO) {
+            val json = LyreBoardCodec.encode(waved)
+            cache.writeBoardJson(boardId, json)
+            api.saveBoard(store.projectId, json)
+        }
+        logActivity("cache", "Set $filled waveforms")
+    }
+
+    fun haltPlayback() {
+        playEpoch.incrementAndGet()
+        playing = false
+        player.invalidatePlay()
+        audio.pause()
+        store.playhead = playhead
+    }
+
+    fun syncTransport(t: Double, sessionPlaying: Boolean) {
+        val board = liveRef.value
+        val files = stillsRef.value
+        val target = lyreClockTarget(board, t)
+        val current = player.currentItem()
+        val pos = player.exo.currentPosition / 1000.0
+        val ended = player.ended()
+        val gen = player.playGeneration
+        val wantVideo = LyreTransport.wantVideoPlay(sessionPlaying, target, current, ended)
+        val tid = LyreTransport.targetId(target)
+        val preloadId = LyrePreview.preloadTargetId(board, t)
+        if (preloadId != null) player.preloadItem(preloadId)
+        when (target) {
+            is LyreClockTarget.Hold, null -> {
+                player.pause()
+                onHold = true
+            }
+            is LyreClockTarget.Movie -> {
+                val promote = LyrePreview.shouldPromoteRam(
+                    playing = sessionPlaying,
+                    targetId = tid,
+                    frontId = current?.id,
+                    ended = ended,
+                    ramId = player.ramItemId(),
+                    ramReady = tid != null && player.ramReady(tid),
+                )
+                val prepared = player.prepared()
+                if (promote && tid != null && player.promoteRam(tid)) {
+                    onHold = false
+                } else if (
+                    tid != null &&
+                    LyrePreview.shouldSeekFront(
+                        promoteRam = promote,
+                        currentId = current?.id,
+                        currentPos = pos,
+                        targetId = tid,
+                        targetPos = target.positionSec,
+                        prepared = prepared,
+                        seekInFlight = player.seekPending(tid),
+                    )
+                ) {
+                    onHold = !player.seekToItem(tid, target.positionSec)
+                } else {
+                    onHold = player.seekPending(tid ?: "")
+                }
+                player.exo.volume = 1f
+                if (wantVideo) {
+                    if (!player.wantedPlaying) player.play(gen)
+                } else if (player.wantedPlaying) {
+                    player.pause()
+                }
+                player.syncLoop(false, null)
+            }
+            is LyreClockTarget.Leftover -> {
+                val promote = LyrePreview.shouldPromoteRam(
+                    playing = sessionPlaying,
+                    targetId = tid,
+                    frontId = current?.id,
+                    ended = ended,
+                    ramId = player.ramItemId(),
+                    ramReady = tid != null && player.ramReady(tid),
+                )
+                val prepared = player.prepared()
+                if (promote && tid != null && player.promoteRam(tid)) {
+                    onHold = false
+                } else if (
+                    tid != null &&
+                    LyrePreview.shouldSeekFront(
+                        promoteRam = promote,
+                        currentId = current?.id,
+                        currentPos = pos,
+                        targetId = tid,
+                        targetPos = target.positionSec,
+                        prepared = prepared,
+                        seekInFlight = player.seekPending(tid),
+                    )
+                ) {
+                    onHold = !player.seekToItem(tid, target.positionSec)
+                } else {
+                    onHold = player.seekPending(tid ?: "")
+                }
+                val muted = board.scenes.asSequence().flatMap { it.frames.asSequence() }
+                    .firstOrNull { frame ->
+                        board.videoLayers.asSequence().flatMap { it.clips.asSequence() }
+                            .any { it.id == target.clipId && it.linkedFrameId == frame.id }
+                    }?.videoMuted == true
+                player.exo.volume = if (muted) 0f else 1f
+                if (wantVideo) {
+                    if (!player.wantedPlaying) player.play(gen)
+                } else if (player.wantedPlaying) {
+                    player.pause()
+                }
+                player.syncLoop(store.loopClip, target.clipId)
+            }
+        }
+        audio.sync(t, sessionPlaying, board.audioLayers, files)
     }
 
     fun seekTo(t: Double, resume: Boolean) {
-        val clamped = t.coerceIn(0.0, duration.toDouble().coerceAtLeast(0.0))
+        val clamped = t.coerceIn(0.0, durationRef.value.toDouble().coerceAtLeast(0.0))
         playhead = clamped.toFloat()
         store.playhead = playhead
-        applyClock(board, player, clamped, resume, store.loopClip) { hold ->
-            onHold = hold
-            playing = resume && !hold
+        if (scrubbing) {
+            syncTransport(clamped, false)
+            return
+        }
+        if (resume) {
+            playing = true
+            syncTransport(clamped, true)
+        } else {
+            if (playing) haltPlayback()
+            syncTransport(clamped, false)
         }
     }
 
     fun togglePlay() {
-        val target = lyreClockTarget(board, playhead.toDouble())
-        if (target is LyreClockTarget.Hold) {
-            val next = lyreNextVideoClip(board, target.frame.id)
-            if (next != null) seekTo(next.start, resume = true)
-            return
-        }
         if (playing) {
-            player.pause()
-            playing = false
-            store.playhead = playhead
+            haltPlayback()
+            syncTransport(playhead.toDouble(), false)
         } else {
             seekTo(playhead.toDouble(), resume = true)
+        }
+    }
+
+    LaunchedEffect(playing) {
+        val epoch = playEpoch.get()
+        fun halted(): Boolean = playEpoch.get() != epoch
+        if (!playing) {
+            player.pause()
+            audio.pause()
+            audio.sync(playhead.toDouble(), false, liveRef.value.audioLayers, stillsRef.value)
+            return@LaunchedEffect
+        }
+        var last = SystemClock.elapsedRealtime()
+        while (isActive) {
+            if (halted()) {
+                player.pause()
+                audio.pause()
+                break
+            }
+            if (scrubbing) {
+                last = SystemClock.elapsedRealtime()
+                delay(40)
+                continue
+            }
+            val board = liveRef.value
+            val now = SystemClock.elapsedRealtime()
+            val dt = ((now - last).coerceAtLeast(0L) / 1000.0).coerceAtMost(0.25)
+            last = now
+            val item = player.currentItem()
+            val pos = player.exo.currentPosition / 1000.0
+            val target = lyreClockTarget(board, playhead.toDouble())
+            val follow = LyreTransport.followPlayer(
+                target,
+                item,
+                player.exo.isPlaying,
+                player.ended(),
+            )
+            val next = LyreTransport.nextPlayhead(
+                board = board,
+                playhead = playhead.toDouble(),
+                dt = dt,
+                duration = durationRef.value.toDouble(),
+                item = item,
+                playerPos = pos,
+                follow = follow,
+            )
+            playhead = next.toFloat()
+            if (playhead >= durationRef.value) {
+                playhead = durationRef.value
+                store.playhead = playhead
+                haltPlayback()
+                break
+            }
+            if (halted()) {
+                player.pause()
+                audio.pause()
+                break
+            }
+            syncTransport(playhead.toDouble(), true)
+            store.playhead = playhead
+            delay(40)
+        }
+    }
+
+    val current = LyreClip.clipAtTime(storyboard, playhead.toDouble())
+    val clockTarget = lyreClockTarget(live, playhead.toDouble())
+    val videoOnScreen = LyreTransport.itemMatches(clockTarget, player.currentItem()) &&
+        player.prepared() &&
+        !player.ended()
+    val showStill = LyrePreview.coverWithStill(clockTarget, playing, videoOnScreen)
+
+    fun handleMenu(id: String) {
+        val m = menu ?: return
+        when (m) {
+            is TrackMenu.Still -> when (id) {
+                "play" -> seekTo(
+                    LyreClip.clipOf(live.scenes, m.frame.id)?.start ?: playhead.toDouble(),
+                    resume = true,
+                )
+                "loop" -> {
+                    store.loopClip = !store.loopClip
+                    logActivity("ui", if (store.loopClip) "Loop on" else "Loop off", frameId = m.frame.id)
+                }
+                "gen_next" -> {
+                    imagine = LyreImagineJob(
+                        LyreImagineMode.NEXT_STILL,
+                        frameId = m.frame.id,
+                        title = m.frame.caption.ifBlank { m.frame.id },
+                    )
+                    extraRefFiles = emptyList()
+                }
+                "edit_still" -> {
+                    imagine = LyreImagineJob(
+                        LyreImagineMode.EDIT_STILL,
+                        frameId = m.frame.id,
+                        title = m.frame.caption.ifBlank { m.frame.id },
+                    )
+                    extraRefFiles = emptyList()
+                }
+                "gen_video" -> {
+                    imagine = LyreImagineJob(
+                        LyreImagineMode.GEN_VIDEO,
+                        frameId = m.frame.id,
+                        title = m.frame.caption.ifBlank { m.frame.id },
+                    )
+                    extraRefFiles = emptyList()
+                }
+            }
+            is TrackMenu.Video -> when (id) {
+                "play" -> seekTo(m.clip.startSec, resume = true)
+                "loop" -> {
+                    store.loopClip = !store.loopClip
+                    logActivity("ui", if (store.loopClip) "Loop on" else "Loop off", clipId = m.clip.id)
+                }
+                "mute" -> {
+                    val nextMuted = m.clip.linkedFrameId?.let { fid ->
+                        live.scenes.flatMap { it.frames }.firstOrNull { it.id == fid }?.videoMuted != true
+                    } ?: true
+                    commit(LyreEdits.setVideoMuted(live, m.clip.id, nextMuted), if (nextMuted) "Muted clip" else "Unmuted clip")
+                }
+                "edit_video" -> {
+                    imagine = LyreImagineJob(
+                        LyreImagineMode.EDIT_VIDEO,
+                        frameId = m.clip.linkedFrameId,
+                        clipId = m.clip.id,
+                        title = m.clip.name.ifBlank { m.clip.id },
+                    )
+                    extraRefFiles = emptyList()
+                }
+                "remove" -> commit(LyreEdits.removeClip(live, m.clip.id), "Removed ${m.clip.name.ifBlank { m.clip.id }}")
+            }
+            is TrackMenu.InsertLibrary -> { }
+            is TrackMenu.Audio -> when (id) {
+                "play" -> seekTo(m.clip.startSec, resume = true)
+                "mute" -> {
+                    val muted = (m.clip.volume ?: 1.0) <= 0.001
+                    commit(
+                        LyreEdits.setClipVolume(live, m.clip.id, if (muted) 1.0 else 0.0),
+                        if (muted) "Unmuted ${m.clip.name}" else "Muted ${m.clip.name}",
+                    )
+                }
+                "env_on" -> commit(LyreEdits.setEnvelopeOn(live, m.clip.id, true), "Envelope on")
+                "env_off" -> commit(LyreEdits.setEnvelopeOn(live, m.clip.id, false), "Envelope off")
+                "fade_in" -> commit(LyreEdits.fadeAudio(live, m.clip.id, fadeInSec = 1.0), "Fade in 1s")
+                "fade_out" -> commit(LyreEdits.fadeAudio(live, m.clip.id, fadeOutSec = 1.0), "Fade out 1s")
+                "env_point" -> {
+                    val local = ((playhead.toDouble() - m.clip.startSec) / m.clip.durationSec.coerceAtLeast(0.0001))
+                        .coerceIn(0.02, 0.98)
+                    val env = LyreEnvelope.addPoint(m.clip, local, LyreEnvelope.gainAt(m.clip, playhead.toDouble()))
+                    commit(LyreEdits.setEnvelope(live, m.clip.id, env), "Envelope point")
+                }
+                "wave" -> {
+                    val file = LyreStorageKeys.file(stills, m.clip.src)
+                    if (file != null) {
+                        scope.launch(Dispatchers.IO) {
+                            val peaks = LyreWaveformDecoder.peaksFromFile(file) ?: return@launch
+                            withContext(Dispatchers.Main) {
+                                commit(LyreEdits.setClipWaveform(live, m.clip.id, peaks.toJson()), "Set waveform")
+                            }
+                        }
+                    }
+                }
+                "remove" -> commit(LyreEdits.removeClip(live, m.clip.id), "Removed ${m.clip.name.ifBlank { m.clip.id }}")
+            }
+            is TrackMenu.Library -> when (id) {
+                "scene" -> {
+                    menu = TrackMenu.PickScene(m.item)
+                    return
+                }
+                "video" -> when (val item = m.item) {
+                    is LyreLibraryItem.Video -> {
+                        val poster = LyreStorageKeys.posterSrc(live, item.item.src)
+                        commit(
+                            LyreEdits.placeVideoAt(
+                                live,
+                                item.item.src,
+                                item.item.name,
+                                item.item.durationSec,
+                                playhead.toDouble(),
+                                poster,
+                            ),
+                            "Placed ${item.item.name.ifBlank { item.item.id }} on video",
+                        )
+                    }
+                    is LyreLibraryItem.Still -> {
+                        val src = item.image.videoSrc
+                        if (!src.isNullOrEmpty()) {
+                            val dur = item.image.videoDurationSec ?: 6.0
+                            commit(
+                                LyreEdits.placeVideoAt(
+                                    live,
+                                    src,
+                                    item.image.caption.ifBlank { item.image.id },
+                                    dur,
+                                    playhead.toDouble(),
+                                    item.image.src,
+                                ),
+                                "Placed clip on video",
+                            )
+                        }
+                    }
+                    else -> Unit
+                }
+                "audio" -> {
+                    val a = (m.item as? LyreLibraryItem.Audio)?.item
+                    if (a != null) {
+                        commit(
+                            LyreEdits.placeAudioAt(live, a.src, a.name, a.durationSec, playhead.toDouble()),
+                            "Placed ${a.name.ifBlank { a.id }} on audio",
+                        )
+                    }
+                }
+                "play" -> {
+                    when (val item = m.item) {
+                        is LyreLibraryItem.Still -> {
+                            val t = item.image.fromFrameId?.let { LyreClip.clipOf(live.scenes, it)?.start }
+                            if (t != null) seekTo(t, resume = false)
+                        }
+                        is LyreLibraryItem.Video -> seekTo(playhead.toDouble(), resume = false)
+                        is LyreLibraryItem.Audio -> seekTo(playhead.toDouble(), resume = true)
+                    }
+                }
+            }
+            is TrackMenu.PickScene, is TrackMenu.InsertLibrary -> { }
+        }
+        menu = null
+    }
+
+    fun placeLibraryItem(item: LyreLibraryItem) {
+        val next = when (item) {
+            is LyreLibraryItem.Still -> {
+                val sceneId = LyreEdits.sceneIdAt(live, playhead.toDouble())
+                var board = LyreEdits.addStillToScene(
+                    live,
+                    sceneId,
+                    item.image.src,
+                    item.image.caption.ifBlank { item.image.id },
+                    item.image.holdSec ?: 6.0,
+                    item.image.videoSrc,
+                    item.image.videoDurationSec,
+                )
+                val clipSrc = item.image.videoSrc
+                if (!clipSrc.isNullOrEmpty()) {
+                    board = LyreEdits.placeVideoAt(
+                        board,
+                        clipSrc,
+                        item.image.caption.ifBlank { item.image.id },
+                        item.image.videoDurationSec ?: 6.0,
+                        playhead.toDouble(),
+                        item.image.src,
+                    )
+                }
+                board
+            }
+            is LyreLibraryItem.Video -> LyreEdits.placeVideoAt(
+                live,
+                item.item.src,
+                item.item.name,
+                item.item.durationSec,
+                playhead.toDouble(),
+                LyreStorageKeys.posterSrc(live, item.item.src),
+            )
+            is LyreLibraryItem.Audio -> LyreEdits.placeAudioAt(
+                live,
+                item.item.src,
+                item.item.name,
+                item.item.durationSec,
+                playhead.toDouble(),
+            )
+        }
+        val label = when (item) {
+            is LyreLibraryItem.Still -> item.image.caption.ifBlank { item.image.id }
+            is LyreLibraryItem.Video -> item.item.name.ifBlank { item.item.id }
+            is LyreLibraryItem.Audio -> item.item.name.ifBlank { item.item.id }
+        }
+        commit(next, "Inserted $label")
+        menu = null
+    }
+
+    fun ingestUris(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        genBusy = true
+        genStatus = "Uploading…"
+        val mark = playhead.toDouble()
+        scope.launch {
+            var next = live
+            var afterId = LyreEdits.nextBreakFrameId(next, mark)
+            val map = HashMap(stills)
+            var count = 0
+            suspend fun putObject(key: String, file: File, contentType: String): Boolean {
+                val bytes = withContext(Dispatchers.IO) { file.readBytes() }
+                val stored = withContext(Dispatchers.IO) {
+                    cache.writeObject(boardId, key, bytes)
+                    api.putStorage(LyreStorageKeys.normalize(key) ?: key.removePrefix("me:"), bytes, contentType)
+                }
+                if (!stored.optBoolean("ok")) return false
+                LyreStorageKeys.index(map, key, cache.objectFile(boardId, key))
+                stills = HashMap(map)
+                return true
+            }
+            for (uri in uris) {
+                try {
+                    val name = LyreUploads.displayName(context, uri).ifBlank { "media" }
+                    val mime = LyreUploads.mime(context, uri)
+                    val kind = LyreEdits.mediaKind(mime, name) ?: continue
+                    val label = name.substringBeforeLast('.').ifBlank { kind }
+                    val destExt = when (kind) {
+                        "still" -> "jpg"
+                        "video" -> LyreUploads.extension(mime, name, "mp4")
+                        else -> LyreUploads.extension(mime, name, "m4a")
+                    }
+                    val key = when (kind) {
+                        "still" -> "me:stills/${LyreEdits.newId("st")}.jpg"
+                        "video" -> "me:videos/${LyreEdits.newId("vid")}.$destExt"
+                        else -> "me:audio/${LyreEdits.newId("st")}.$destExt"
+                    }
+                    val tmp = File(cache.boardDir(boardId), "tmp/${System.currentTimeMillis()}-$count.$destExt")
+                    val copied = withContext(Dispatchers.IO) {
+                        if (kind == "still") LyreUploads.copyStillJpeg(context, uri, tmp) else LyreUploads.copy(context, uri, tmp)
+                    }
+                    if (!copied) continue
+                    val contentType = mime.ifBlank {
+                        when (kind) {
+                            "still" -> "image/jpeg"
+                            "video" -> "video/mp4"
+                            else -> "audio/mp4"
+                        }
+                    }
+                    if (!putObject(key, tmp, contentType)) {
+                        tmp.delete()
+                        continue
+                    }
+                    next = when (kind) {
+                        "still" -> {
+                            val ins = LyreEdits.insertPictureAfter(next, afterId, key, label, 6.0)
+                            afterId = ins.frameId.ifBlank { afterId }
+                            LyreEdits.addStillToLibrary(ins.board, key, label)
+                        }
+                        "video" -> {
+                            val dur = withContext(Dispatchers.IO) { LyreUploads.durationSec(tmp) }
+                            val posterKey = "me:stills/${LyreEdits.newId("st")}.jpg"
+                            val poster = File(cache.boardDir(boardId), "tmp/${System.currentTimeMillis()}-$count-poster.jpg")
+                            val framed = withContext(Dispatchers.IO) { LyreUploads.firstFrameJpeg(tmp, poster) }
+                            var board = LyreEdits.addVideoToLibrary(next, key, label, dur)
+                            if (framed && poster.isFile) {
+                                if (putObject(posterKey, poster, "image/jpeg")) {
+                                    val ins = LyreEdits.insertPictureAfter(
+                                        board,
+                                        afterId,
+                                        posterKey,
+                                        label,
+                                        dur,
+                                        videoSrc = key,
+                                        videoDurationSec = dur,
+                                    )
+                                    afterId = ins.frameId.ifBlank { afterId }
+                                    board = LyreEdits.addStillToLibrary(ins.board, posterKey, label)
+                                } else {
+                                    board = LyreEdits.placeVideoAt(board, key, label, dur, mark)
+                                }
+                            } else {
+                                board = LyreEdits.placeVideoAt(board, key, label, dur, mark)
+                            }
+                            poster.delete()
+                            board
+                        }
+                        else -> {
+                            val dur = withContext(Dispatchers.IO) { LyreUploads.durationSec(tmp) }
+                            LyreEdits.placeAudioOnNewTrack(
+                                LyreEdits.addAudioToLibrary(next, key, label, dur),
+                                key,
+                                label,
+                                dur,
+                            )
+                        }
+                    }
+                    count++
+                    tmp.delete()
+                } catch (_: Exception) {
+                }
+            }
+            if (count > 0) commit(next, "Uploaded $count item${if (count == 1) "" else "s"}")
+            genBusy = false
+            genStatus = if (count == 0) "Upload failed" else null
+        }
+    }
+
+    fun indexStill(key: String, file: File) {
+        val map = HashMap(stills)
+        LyreStorageKeys.index(map, key, file)
+        stills = map
+    }
+
+    fun applyImagineResult(job: LyreImagineJob, src: String, duration: Double) {
+        scope.launch(Dispatchers.IO) {
+            val file = cache.resolve(boardId, src)
+            withContext(Dispatchers.Main) {
+                if (file != null) indexStill(src, file)
+                val next = when (job.mode) {
+                    LyreImagineMode.NEXT_STILL -> {
+                        val cap = job.frameId?.let { fid ->
+                            live.scenes.flatMap { it.frames }.firstOrNull { it.id == fid }?.caption
+                        }.orEmpty().ifBlank { "Generated still" }
+                        val afterId = job.frameId ?: LyreEdits.nextBreakFrameId(live, playhead.toDouble())
+                        val ins = LyreEdits.insertPictureAfter(live, afterId, src, cap, 6.0)
+                        LyreEdits.addStillToLibrary(ins.board, src, cap)
+                    }
+                    LyreImagineMode.EDIT_STILL -> {
+                        val fid = job.frameId ?: return@withContext
+                        LyreEdits.replaceStillSrc(live, fid, src)
+                    }
+                    LyreImagineMode.GEN_VIDEO -> {
+                        val fid = job.frameId ?: return@withContext
+                        LyreEdits.addVideoToLibrary(
+                            LyreEdits.attachGeneratedVideo(live, fid, src, duration),
+                            src,
+                            job.title,
+                            duration,
+                        )
+                    }
+                    LyreImagineMode.EDIT_VIDEO -> {
+                        val cid = job.clipId ?: return@withContext
+                        LyreEdits.replaceVideoSrc(live, cid, src, duration)
+                    }
+                }
+                commit(next, when (job.mode) {
+                    LyreImagineMode.NEXT_STILL -> "Generated still"
+                    LyreImagineMode.EDIT_STILL -> "Edited still"
+                    LyreImagineMode.GEN_VIDEO -> "Generated video"
+                    LyreImagineMode.EDIT_VIDEO -> "Edited video"
+                })
+            }
+        }
+    }
+
+    fun runImagine(draft: LyreImagineDraft) {
+        val job = imagine ?: return
+        genBusy = true
+        genStatus = "Generating…"
+        scope.launch {
+            try {
+                val sourceStill = job.frameId?.let { fid ->
+                    live.scenes.flatMap { it.frames }.firstOrNull { it.id == fid }?.src
+                }?.let { LyreStorageKeys.file(stills, it) }
+                val refFiles = draft.refs.mapNotNull { LyreStorageKeys.file(stills, it.src) } + extraRefFiles
+                val result = withContext(Dispatchers.IO) {
+                    val client = LyreImagineClient(
+                        api,
+                        HostApiKeyStore.getValue(context, ApiKeyIds.SPACEXAI),
+                    )
+                    when (job.mode) {
+                        LyreImagineMode.NEXT_STILL, LyreImagineMode.EDIT_STILL -> {
+                            client.generateStill(draft.prompt, sourceStill, refFiles, draft.aspect)
+                        }
+                        LyreImagineMode.GEN_VIDEO, LyreImagineMode.EDIT_VIDEO -> {
+                            val clip = job.clipId?.let { id ->
+                                live.videoLayers.flatMap { it.clips }.firstOrNull { it.id == id }
+                            }
+                            client.startVideo(
+                                prompt = draft.prompt,
+                                sourceStill = sourceStill ?: clip?.let {
+                                    LyreStorageKeys.file(stills, LyreStorageKeys.posterSrc(live, it.src))
+                                },
+                                refs = refFiles,
+                                voices = draft.voices,
+                                duration = draft.duration,
+                                aspect = draft.aspect,
+                                resolution = "720p",
+                                mode = if (job.mode == LyreImagineMode.EDIT_VIDEO) "edit" else "generate",
+                                videoKey = clip?.src?.let { LyreStorageKeys.normalize(it) },
+                                videoFile = clip?.src?.let { LyreStorageKeys.file(stills, it) },
+                            )
+                        }
+                    }
+                }
+                if (!result.optBoolean("ok")) {
+                    genStatus = result.optString("error").ifBlank { "generate_failed" }
+                    genBusy = false
+                    return@launch
+                }
+                if (result.optString("status") == "done" || result.optString("key").isNotBlank()) {
+                    val key = result.optString("src").ifBlank { "me:" + result.optString("key") }
+                    applyImagineResult(job, key, result.optDouble("duration", draft.duration.toDouble()))
+                    genBusy = false
+                    genStatus = null
+                    imagine = null
+                    extraRefFiles = emptyList()
+                    return@launch
+                }
+                val rid = result.optString("request_id").ifBlank { result.optString("id") }
+                if (rid.isBlank()) {
+                    genStatus = "no_request_id"
+                    genBusy = false
+                    return@launch
+                }
+                genStatus = "Rendering video…"
+                val deadline = SystemClock.elapsedRealtime() + 10 * 60 * 1000L
+                while (SystemClock.elapsedRealtime() < deadline) {
+                    delay(5000)
+                    val st = withContext(Dispatchers.IO) {
+                        LyreImagineClient(
+                            api,
+                            HostApiKeyStore.getValue(context, ApiKeyIds.SPACEXAI),
+                        ).pollVideo(rid)
+                    }
+                    val status = st.optString("status")
+                    if (st.optBoolean("ok") && (status == "done" || st.optString("key").isNotBlank())) {
+                        val key = st.optString("src").ifBlank { "me:" + st.optString("key") }
+                        applyImagineResult(job, key, st.optDouble("duration", draft.duration.toDouble()))
+                        genBusy = false
+                        genStatus = null
+                        imagine = null
+                        extraRefFiles = emptyList()
+                        return@launch
+                    }
+                    if (!st.optBoolean("ok") && status != "pending") {
+                        genStatus = st.optString("error").ifBlank { status.ifBlank { "failed" } }
+                        genBusy = false
+                        return@launch
+                    }
+                }
+                genStatus = "timed_out"
+                genBusy = false
+            } catch (e: Exception) {
+                genStatus = e.message ?: "failed"
+                genBusy = false
+            }
+        }
+    }
+
+    val pickMedia = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris -> ingestUris(uris) }
+    val pickImagineRef = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch(Dispatchers.IO) {
+            val tmp = File(cache.boardDir(boardId), "tmp/ref-${System.currentTimeMillis()}.jpg")
+            if (LyreUploads.copyStillJpeg(context, uri, tmp)) {
+                withContext(Dispatchers.Main) {
+                    extraRefFiles = (extraRefFiles + tmp).take(3)
+                }
+            }
         }
     }
 
@@ -220,7 +976,7 @@ fun LyreEditor(
                 )
             }
             Text(
-                board.title.ifBlank { "Untitled" },
+                live.title.ifBlank { "Untitled" },
                 color = GrokifyColors.TextPrimary,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 16.sp,
@@ -253,51 +1009,13 @@ fun LyreEditor(
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
             )
         }
-
-        LyrePlayerStage(
-            player = player,
-            hasVideo = program.isNotEmpty(),
-            still = current?.frame,
-            stillFile = current?.frame?.src?.let { stills[it] },
-            showStill = showStill,
-            playing = playing,
-            playhead = playhead,
-            duration = duration,
-            onTogglePlay = { togglePlay() },
-        )
-
-        LyreClock(
-            clips = storyboard,
-            stills = stills,
-            playhead = playhead,
-            duration = duration,
-            onSeek = { seekTo(it, resume = playing && !onHold) },
-        )
-
-        LyreStillsRail(
-            clips = storyboard,
-            stills = stills,
-            currentId = current?.frame?.id,
-            onSelect = { seekTo(it.start, resume = false) },
-        )
-
-        LyreVideoRail(
-            clips = programLayers.firstOrNull()?.clips.orEmpty(),
-            stills = stills,
-            board = board,
-            storyboard = storyboard,
-            onSelectMovie = {
-                val first = storyboard.firstOrNull { LyreMovie.frameInMovie(board.movie, board.videoLayers, it.frame.id) }
-                seekTo(first?.start ?: 0.0, resume = false)
-            },
-            onSelectLeftover = { clip ->
-                val sc = clip.linkedFrameId?.let { LyreClip.clipOf(board.scenes, it) }
-                if (sc != null) seekTo(sc.start, resume = false)
-            },
-        )
-
-        if (board.audioLayers.isNotEmpty()) {
-            LyreAudioRails(board.audioLayers)
+        if (!genStatus.isNullOrBlank()) {
+            Text(
+                genStatus!!,
+                color = if (genBusy) GrokifyColors.GlowAmber else GrokifyColors.GlowRose,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+            )
         }
 
         Box(
@@ -305,18 +1023,146 @@ fun LyreEditor(
                 .weight(1f)
                 .fillMaxWidth(),
         ) {
-            when (chip) {
-                "library" -> LyreLibraryPane(board)
-                "bin" -> LyreBinPane(board)
-                "activity" -> LyreActivityPane()
-                else -> LyreScenesPane(board)
+            Column(Modifier.fillMaxSize()) {
+                LyrePlayerStage(
+                    player = player,
+                    hasVideo = program.isNotEmpty(),
+                    still = current?.frame,
+                    stillFile = current?.frame?.src?.let { LyreStorageKeys.file(stills, it) },
+                    showStill = showStill,
+                    playing = playing,
+                    playhead = playhead,
+                    duration = duration,
+                    swapEpoch = player.swapEpoch,
+                    onTogglePlay = { togglePlay() },
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                )
+                LyreTimeline(
+                    board = live,
+                    stills = stills,
+                    storyboard = storyboard,
+                    programClips = pictureClips,
+                    playhead = playhead,
+                    duration = duration,
+                    pps = pps,
+                    onPps = {
+                        pps = it
+                        store.timelinePps = it
+                    },
+                    onSeek = { seekTo(it, resume = playing && !scrubbing) },
+                    onPlayheadDragStart = {
+                        scrubbing = true
+                        if (playing) {
+                            player.pause()
+                            audio.pause()
+                        }
+                    },
+                    onPlayheadDrag = { t -> seekTo(t, resume = false) },
+                    onPlayheadDragEnd = { scrubbing = false },
+                    onMenuStill = { menu = TrackMenu.Still(it.frame) },
+                    onMenuVideo = { clip, locked -> menu = TrackMenu.Video(clip, locked = locked) },
+                    onMenuAudio = { layer, clip -> menu = TrackMenu.Audio(layer, clip) },
+                    onMoveStill = { clip, t ->
+                        commit(LyreEdits.moveStillTo(live, clip.frame.id, t), "Moved still")
+                    },
+                    onMoveVideo = { clip, t ->
+                        commit(LyreEdits.moveVideoClip(live, clip.id, t), "Moved clip")
+                    },
+                    onMoveAudio = { clip, t, lane ->
+                        commit(LyreEdits.moveAudioClip(live, clip.id, t, lane), "Moved audio")
+                    },
+                    onAddAudioTrack = {
+                        commit(LyreEdits.addAudioTrack(live), "Added audio track")
+                    },
+                    onTrimStillLeft = { clip, t ->
+                        commit(LyreEdits.trimStillLeft(live, clip.frame.id, t), "Trim still")
+                    },
+                    onTrimStillRight = { clip, t ->
+                        commit(LyreEdits.trimStillRight(live, clip.frame.id, t), "Trim still")
+                    },
+                    onTrimClip = { clip, start, end ->
+                        commit(LyreEdits.trimClip(live, clip.id, start, end), "Trim clip")
+                    },
+                    onEnvelopePoint = { clip, index, t, v ->
+                        commit(
+                            LyreEdits.setEnvelope(live, clip.id, LyreEnvelope.movePoint(clip, index, t, v)),
+                            "Envelope",
+                        )
+                    },
+                    onEnvelopeAdd = { clip, t, v ->
+                        commit(
+                            LyreEdits.setEnvelope(live, clip.id, LyreEnvelope.addPoint(clip, t, v)),
+                            "Envelope point",
+                        )
+                    },
+                    onUploadMedia = {
+                        pickMedia.launch(arrayOf("image/*", "video/*", "audio/*"))
+                    },
+                    onGenerateImage = {
+                        val hostId = LyreEdits.nextBreakFrameId(live, playhead.toDouble())
+                        val host = hostId?.let { id -> live.scenes.flatMap { it.frames }.firstOrNull { it.id == id } }
+                        imagine = LyreImagineJob(
+                            LyreImagineMode.NEXT_STILL,
+                            frameId = hostId,
+                            title = host?.caption?.ifBlank { "Generate image" } ?: "Generate image",
+                        )
+                        extraRefFiles = emptyList()
+                    },
+                    onInsertLibrary = { menu = TrackMenu.InsertLibrary },
+                )
+            }
+            if (chip == "library" || chip == "bin" || chip == "activity" || chip == "scenes") {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(GrokifyColors.Void),
+                ) {
+                    when (chip) {
+                        "library" -> LyreLibraryPane(
+                            board = live,
+                            stills = stills,
+                            onOpen = { item -> menu = TrackMenu.Library(item) },
+                            onLongItem = { item -> menu = TrackMenu.Library(item) },
+                        )
+                        "bin" -> LyreBinPane(live, stills)
+                        "activity" -> LyreActivityPane(
+                            activity = activity,
+                            tick = activityTick,
+                            onJump = { line ->
+                                val t = lyreJumpTime(live, line) ?: return@LyreActivityPane
+                                seekTo(t, resume = false)
+                                chip = ""
+                                store.chip = ""
+                            },
+                        )
+                        else -> LyreScenesPane(
+                            board = live,
+                            stills = stills,
+                            onSeekScene = { scene ->
+                                val t = storyboard.firstOrNull { it.sceneId == scene.id }?.start ?: 0.0
+                                seekTo(t, resume = false)
+                                chip = ""
+                                store.chip = ""
+                            },
+                            onSeekFrame = { frame ->
+                                val t = LyreClip.clipOf(live.scenes, frame.id)?.start ?: return@LyreScenesPane
+                                seekTo(t, resume = false)
+                                chip = ""
+                                store.chip = ""
+                            },
+                            onLongFrame = { _, frame -> menu = TrackMenu.Still(frame) },
+                        )
+                    }
+                }
             }
         }
 
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 6.dp),
+                .padding(horizontal = 8.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             CHIPS.forEach { (id, label) ->
@@ -324,8 +1170,9 @@ fun LyreEditor(
                 FilterChip(
                     selected = on,
                     onClick = {
-                        chip = id
-                        store.chip = id
+                        chip = if (on) "" else id
+                        store.chip = chip
+                        logActivity("ui", if (chip.isEmpty()) "Closed $label" else "Opened $label")
                     },
                     label = { Text(label, fontSize = 12.sp, maxLines = 1) },
                     modifier = Modifier.weight(1f),
@@ -346,51 +1193,210 @@ fun LyreEditor(
         }
     }
 
+    when (val m = menu) {
+        is TrackMenu.Still -> LyreActionSheet(
+            title = m.frame.caption.ifBlank { m.frame.id },
+            subtitle = "Still · ${"%.1f".format(LyreClip.clipLength(m.frame))}s",
+            actions = listOf(
+                LyreMenuAction("play", "Play from here"),
+                LyreMenuAction("loop", if (store.loopClip) "Loop off" else "Loop clip"),
+                LyreMenuAction("gen_next", "Generate next image"),
+                LyreMenuAction("edit_still", "Edit still"),
+                LyreMenuAction("gen_video", "Generate video"),
+            ),
+            onAction = { handleMenu(it) },
+            onDismiss = { menu = null },
+        )
+        is TrackMenu.Video -> LyreActionSheet(
+            title = m.clip.name.ifBlank { m.clip.id },
+            subtitle = buildString {
+                append(if (m.locked) "Movie" else "Clip")
+                append(" · ${"%.1f".format(m.clip.durationSec)}s")
+            },
+            actions = buildList {
+                add(LyreMenuAction("play", "Play from here"))
+                if (!m.locked) add(LyreMenuAction("loop", if (store.loopClip) "Loop off" else "Loop this clip"))
+                if (!m.locked) add(LyreMenuAction("mute", "Mute / unmute"))
+                if (!m.locked) add(LyreMenuAction("edit_video", "Edit video"))
+                if (!m.locked) add(LyreMenuAction("remove", "Remove from track", destructive = true))
+            },
+            onAction = { handleMenu(it) },
+            onDismiss = { menu = null },
+        )
+        is TrackMenu.Audio -> {
+            val envOn = LyreEnvelope.parseClip(m.clip)?.on == true
+            LyreActionSheet(
+                title = m.clip.name.ifBlank { m.clip.id },
+                subtitle = "${m.layer.name} · ${"%.1f".format(m.clip.durationSec)}s @ ${"%.1f".format(m.clip.startSec)}s",
+                actions = listOf(
+                    LyreMenuAction("play", "Play from here"),
+                    LyreMenuAction("mute", if ((m.clip.volume ?: 1.0) <= 0.001) "Unmute" else "Mute"),
+                    LyreMenuAction(if (envOn) "env_off" else "env_on", if (envOn) "Envelope off" else "Envelope on"),
+                    LyreMenuAction("fade_in", "Fade in 1s"),
+                    LyreMenuAction("fade_out", "Fade out 1s"),
+                    LyreMenuAction("env_point", "Add envelope point at playhead"),
+                    LyreMenuAction("wave", "Set waveform"),
+                    LyreMenuAction("remove", "Remove from track", destructive = true),
+                ),
+                onAction = { handleMenu(it) },
+                onDismiss = { menu = null },
+            )
+        }
+        is TrackMenu.Library -> {
+            val actions = buildList {
+                add(LyreMenuAction("scene", "Add to scene…"))
+                when (val item = m.item) {
+                    is LyreLibraryItem.Video -> add(LyreMenuAction("video", "Place on video track"))
+                    is LyreLibraryItem.Audio -> add(LyreMenuAction("audio", "Place on audio track"))
+                    is LyreLibraryItem.Still -> {
+                        if (!item.image.videoSrc.isNullOrEmpty()) {
+                            add(LyreMenuAction("video", "Place clip on video track"))
+                        }
+                    }
+                }
+            }.distinctBy { it.id }
+            val title = when (val item = m.item) {
+                is LyreLibraryItem.Still -> item.image.caption.ifBlank { item.image.id }
+                is LyreLibraryItem.Video -> item.item.name.ifBlank { item.item.id }
+                is LyreLibraryItem.Audio -> item.item.name.ifBlank { item.item.id }
+            }
+            LyreActionSheet(
+                title = title,
+                subtitle = "Library",
+                actions = actions,
+                onAction = { handleMenu(it) },
+                onDismiss = { menu = null },
+            )
+        }
+        is TrackMenu.PickScene -> AlertDialog(
+            onDismissRequest = { menu = null },
+            title = { Text("Add to scene") },
+            text = {
+                Column {
+                    live.scenes.forEach { scene ->
+                        Text(
+                            scene.title.ifBlank { scene.id },
+                            color = GrokifyColors.TextPrimary,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    val next = when (val item = m.item) {
+                                        is LyreLibraryItem.Still -> LyreEdits.addStillToScene(
+                                            live,
+                                            scene.id,
+                                            item.image.src,
+                                            item.image.caption.ifBlank { item.image.id },
+                                            item.image.holdSec ?: 6.0,
+                                            item.image.videoSrc,
+                                            item.image.videoDurationSec,
+                                        )
+                                        is LyreLibraryItem.Video -> LyreEdits.addStillToScene(
+                                            live,
+                                            scene.id,
+                                            LyreStorageKeys.posterSrc(live, item.item.src).orEmpty(),
+                                            item.item.name,
+                                            item.item.durationSec,
+                                            item.item.src,
+                                            item.item.durationSec,
+                                        )
+                                        is LyreLibraryItem.Audio -> LyreEdits.placeAudioAt(
+                                            live,
+                                            item.item.src,
+                                            item.item.name,
+                                            item.item.durationSec,
+                                            playhead.toDouble(),
+                                        )
+                                    }
+                                    val label = scene.title.ifBlank { scene.id }
+                                    commit(next, "Added to $label")
+                                    menu = null
+                                }
+                                .padding(vertical = 10.dp),
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { menu = null }) { Text("Cancel") }
+            },
+        )
+        is TrackMenu.InsertLibrary -> {
+            val actions = buildList {
+                live.refFolders.forEach { folder ->
+                    folder.images.forEach { image ->
+                        add(LyreMenuAction("s:${folder.id}:${image.id}", "Still · ${image.caption.ifBlank { image.id }}"))
+                    }
+                }
+                live.libraryVideo.filter { it.deletedAt == null }.forEach { video ->
+                    add(LyreMenuAction("v:${video.id}", "Video · ${video.name.ifBlank { video.id }}"))
+                }
+                live.libraryAudio.filter { it.deletedAt == null }.forEach { audio ->
+                    add(LyreMenuAction("a:${audio.id}", "Audio · ${audio.name.ifBlank { audio.id }}"))
+                }
+            }.take(80)
+            LyreActionSheet(
+                title = "Insert from library",
+                subtitle = "Drops at the playhead",
+                actions = if (actions.isEmpty()) listOf(LyreMenuAction("empty", "Library is empty")) else actions,
+                onAction = { id ->
+                    when {
+                        id.startsWith("s:") -> {
+                            val parts = id.split(":")
+                            val folderId = parts.getOrNull(1)
+                            val imageId = parts.getOrNull(2)
+                            val image = live.refFolders.firstOrNull { it.id == folderId }?.images?.firstOrNull { it.id == imageId }
+                            val folder = live.refFolders.firstOrNull { it.id == folderId }
+                            if (image != null && folder != null) placeLibraryItem(LyreLibraryItem.Still(folder, image))
+                            else menu = null
+                        }
+                        id.startsWith("v:") -> {
+                            val vid = live.libraryVideo.firstOrNull { it.id == id.removePrefix("v:") }
+                            if (vid != null) placeLibraryItem(LyreLibraryItem.Video(vid)) else menu = null
+                        }
+                        id.startsWith("a:") -> {
+                            val aud = live.libraryAudio.firstOrNull { it.id == id.removePrefix("a:") }
+                            if (aud != null) placeLibraryItem(LyreLibraryItem.Audio(aud)) else menu = null
+                        }
+                        else -> menu = null
+                    }
+                },
+                onDismiss = { menu = null },
+            )
+        }
+        null -> Unit
+    }
+
+    imagine?.let { job ->
+        LyreImagineSheet(
+            job = job,
+            board = live,
+            stills = stills,
+            busy = genBusy,
+            status = genStatus,
+            extraFiles = extraRefFiles,
+            onGenerate = { runImagine(it) },
+            onPickGalleryRef = { pickImagineRef.launch("image/*") },
+            onDismiss = {
+                if (!genBusy) {
+                    imagine = null
+                    extraRefFiles = emptyList()
+                    genStatus = null
+                }
+            },
+        )
+    }
+
     if (switcher) {
         AlertDialog(
             onDismissRequest = { switcher = false },
             title = { Text("Projects") },
             text = {
-                Text("${board.title.ifBlank { "Untitled" }}\nShared with desktop LYRE")
+                Text("${live.title.ifBlank { "Untitled" }}\nShared with desktop LYRE")
             },
             confirmButton = {
                 TextButton(onClick = { switcher = false }) { Text("Close") }
             },
         )
-    }
-}
-
-private fun applyClock(
-    board: BoardData,
-    player: LyrePlayer,
-    t: Double,
-    resume: Boolean,
-    loopClip: Boolean,
-    onHold: (Boolean) -> Unit,
-) {
-    when (val target = lyreClockTarget(board, t)) {
-        is LyreClockTarget.Hold -> {
-            player.pause()
-            player.syncLoop(false, null)
-            onHold(true)
-        }
-        is LyreClockTarget.Movie -> {
-            val ok = player.seekToItem("lc_movie", target.positionSec)
-            if (ok && resume) player.play() else player.pause()
-            player.syncLoop(false, null)
-            onHold(!ok)
-        }
-        is LyreClockTarget.Leftover -> {
-            val ok = player.seekToItem(target.clipId, target.positionSec)
-            if (ok && resume) player.play() else player.pause()
-            player.syncLoop(loopClip, target.clipId)
-            onHold(!ok)
-        }
-        null -> {
-            player.pause()
-            player.syncLoop(false, null)
-            onHold(true)
-        }
     }
 }
 
@@ -404,15 +1410,13 @@ private fun LyrePlayerStage(
     playing: Boolean,
     playhead: Float,
     duration: Float,
+    swapEpoch: Int,
     onTogglePlay: () -> Unit,
+    modifier: Modifier = Modifier
+        .fillMaxWidth()
+        .height(132.dp),
 ) {
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .heightIn(max = 220.dp)
-            .aspectRatio(16f / 9f)
-            .background(GrokifyColors.VoidElevated),
-    ) {
+    Box(modifier.background(GrokifyColors.VoidElevated)) {
         if (hasVideo) {
             AndroidView(
                 factory = { ctx ->
@@ -421,13 +1425,20 @@ private fun LyrePlayerStage(
                         useController = false
                         controllerAutoShow = false
                         hideController()
-                        setShutterBackgroundColor(android.graphics.Color.BLACK)
+                        isClickable = false
+                        isFocusable = false
+                        setKeepContentOnPlayerReset(true)
+                        setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
                         setBackgroundColor(android.graphics.Color.BLACK)
                     }
                 },
                 update = { view ->
-                    view.player = player.exo
+                    if (swapEpoch >= 0 && view.player !== player.exo) {
+                        view.player = player.exo
+                    }
+                    view.setKeepContentOnPlayerReset(true)
                     view.useController = false
+                    view.isClickable = false
                     view.hideController()
                 },
                 onRelease = { view -> view.player = null },
@@ -436,11 +1447,12 @@ private fun LyrePlayerStage(
         }
         if (showStill) {
             if (stillFile != null) {
-                AsyncImage(
-                    model = stillFile,
+                LyreStillImage(
+                    file = stillFile,
                     contentDescription = still?.caption,
                     contentScale = ContentScale.Fit,
                     modifier = Modifier.fillMaxSize(),
+                    fallback = still?.caption,
                 )
             } else {
                 Box(
@@ -457,19 +1469,27 @@ private fun LyrePlayerStage(
                 }
             }
         }
-        IconButton(
-            onClick = onTogglePlay,
-            modifier = Modifier
-                .align(Alignment.Center)
-                .size(56.dp)
-                .background(GrokifyColors.Scrim, CircleShape),
+        Box(
+            Modifier
+                .fillMaxSize()
+                .clickable(onClick = onTogglePlay),
+            contentAlignment = Alignment.Center,
         ) {
-            Icon(
-                if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                contentDescription = if (playing) "Pause" else "Play",
-                tint = GrokifyColors.TextPrimary,
-                modifier = Modifier.size(32.dp),
-            )
+            if (!playing) {
+                Box(
+                    Modifier
+                        .size(48.dp)
+                        .background(GrokifyColors.Scrim, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Filled.PlayArrow,
+                        contentDescription = "Play",
+                        tint = GrokifyColors.TextPrimary,
+                        modifier = Modifier.size(28.dp),
+                    )
+                }
+            }
         }
         Text(
             "${fmtTime(playhead)} / ${fmtTime(duration)}",
@@ -480,265 +1500,6 @@ private fun LyrePlayerStage(
                 .padding(8.dp),
         )
     }
-}
-
-@Composable
-private fun LyreClock(
-    clips: List<StoryboardClip>,
-    stills: Map<String, File>,
-    playhead: Float,
-    duration: Float,
-    onSeek: (Double) -> Unit,
-) {
-    val total = duration.coerceAtLeast(0.1f)
-    val sceneStarts = remember(clips) { clips.distinctBy { it.sceneId } }
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(top = 6.dp),
-    ) {
-        BoxWithConstraints(
-            Modifier
-                .fillMaxWidth()
-                .height(16.dp)
-                .padding(horizontal = 8.dp),
-        ) {
-            sceneStarts.forEach { clip ->
-                val x = maxWidth * (clip.start.toFloat() / total)
-                Text(
-                    clip.sceneTitle,
-                    color = GrokifyColors.TextMuted,
-                    fontSize = 9.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .offset(x = x)
-                        .padding(end = 4.dp),
-                )
-            }
-        }
-        BoxWithConstraints(
-            Modifier
-                .fillMaxWidth()
-                .height(48.dp)
-                .padding(horizontal = 8.dp)
-                .clip(RoundedCornerShape(6.dp))
-                .background(GrokifyColors.Panel)
-                .pointerInput(total) {
-                    detectTapGestures { offset ->
-                        onSeek((offset.x / size.width.toFloat()) * total.toDouble())
-                    }
-                },
-        ) {
-            if (clips.isNotEmpty()) {
-                Row(Modifier.fillMaxSize()) {
-                    clips.forEach { clip ->
-                        val w = (clip.length.toFloat() / total).coerceAtLeast(0.02f)
-                        val file = stills[clip.frame.src]
-                        Box(
-                            Modifier
-                                .weight(w)
-                                .fillMaxHeight()
-                                .border(0.5.dp, GrokifyColors.PanelBorder),
-                        ) {
-                            if (file != null) {
-                                AsyncImage(
-                                    model = file,
-                                    contentDescription = clip.frame.caption,
-                                    contentScale = ContentScale.FillBounds,
-                                    modifier = Modifier.fillMaxSize(),
-                                )
-                            } else {
-                                Box(Modifier.fillMaxSize().background(GrokifyColors.PanelSoft))
-                            }
-                        }
-                    }
-                }
-            }
-            val x = maxWidth * (playhead / total).coerceIn(0f, 1f)
-            Box(
-                Modifier
-                    .offset(x = x - 1.dp)
-                    .width(2.dp)
-                    .fillMaxHeight()
-                    .background(GrokifyColors.GlowRose),
-            )
-        }
-    }
-}
-
-@Composable
-private fun LyreStillsRail(
-    clips: List<StoryboardClip>,
-    stills: Map<String, File>,
-    currentId: String?,
-    onSelect: (StoryboardClip) -> Unit,
-) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 8.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        clips.forEach { clip ->
-            val selected = clip.frame.id == currentId
-            val file = stills[clip.frame.src]
-            Box(
-                Modifier
-                    .size(56.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .border(
-                        1.5.dp,
-                        if (selected) GrokifyColors.GlowRose else GrokifyColors.PanelBorder,
-                        RoundedCornerShape(6.dp),
-                    )
-                    .clickable { onSelect(clip) },
-            ) {
-                if (file != null) {
-                    AsyncImage(
-                        model = file,
-                        contentDescription = clip.frame.caption,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                } else {
-                    Box(Modifier.fillMaxSize().background(GrokifyColors.PanelSoft))
-                }
-            }
-        }
-        if (clips.isEmpty()) {
-            Text("No stills", color = GrokifyColors.TextMuted, fontSize = 12.sp)
-        }
-    }
-}
-
-@Composable
-private fun LyreVideoRail(
-    clips: List<LayerClip>,
-    stills: Map<String, File>,
-    board: BoardData,
-    storyboard: List<StoryboardClip>,
-    onSelectMovie: () -> Unit,
-    onSelectLeftover: (LayerClip) -> Unit,
-) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 8.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        if (clips.isEmpty()) {
-            Text("No video", color = GrokifyColors.TextMuted, fontSize = 12.sp)
-            return@Row
-        }
-        clips.forEach { clip ->
-            val locked = clip.id == "lc_movie"
-            val poster = posterFile(clip, stills, board, storyboard)
-            Box(
-                Modifier
-                    .height(44.dp)
-                    .width(if (locked) 96.dp else 72.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(GrokifyColors.Panel)
-                    .border(
-                        1.dp,
-                        if (locked) GrokifyColors.GlowRose else GrokifyColors.PanelBorder,
-                        RoundedCornerShape(6.dp),
-                    )
-                    .clickable { if (locked) onSelectMovie() else onSelectLeftover(clip) },
-            ) {
-                if (poster != null) {
-                    AsyncImage(
-                        model = poster,
-                        contentDescription = clip.name,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                }
-                Row(
-                    Modifier
-                        .align(Alignment.BottomStart)
-                        .background(GrokifyColors.Scrim)
-                        .padding(horizontal = 4.dp, vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    if (locked) {
-                        Icon(
-                            Icons.Filled.Lock,
-                            contentDescription = null,
-                            tint = GrokifyColors.GlowRose,
-                            modifier = Modifier.size(10.dp),
-                        )
-                        Spacer(Modifier.width(3.dp))
-                    }
-                    Text(
-                        clip.name.ifBlank { clip.id },
-                        color = GrokifyColors.TextPrimary,
-                        fontSize = 9.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun LyreAudioRails(layers: List<io.grokify.os.apps.lyre.MediaLayer>) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp)) {
-        layers.forEach { layer ->
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(vertical = 2.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    layer.name.ifBlank { "Audio" },
-                    color = GrokifyColors.TextMuted,
-                    fontSize = 10.sp,
-                    modifier = Modifier.width(52.dp),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                layer.clips.forEach { clip ->
-                    Text(
-                        "${clip.name.ifBlank { clip.id }} · ${"%.1f".format(clip.durationSec)}s",
-                        color = GrokifyColors.TextPrimary,
-                        fontSize = 11.sp,
-                        modifier = Modifier
-                            .background(GrokifyColors.Panel, RoundedCornerShape(6.dp))
-                            .padding(horizontal = 8.dp, vertical = 6.dp),
-                    )
-                }
-                if (layer.clips.isEmpty()) {
-                    Text("—", color = GrokifyColors.TextDim, fontSize = 11.sp)
-                }
-            }
-        }
-    }
-}
-
-private fun posterFile(
-    clip: LayerClip,
-    stills: Map<String, File>,
-    board: BoardData,
-    storyboard: List<StoryboardClip>,
-): File? {
-    if (clip.id == "lc_movie") {
-        val first = storyboard.firstOrNull {
-            LyreMovie.frameInMovie(board.movie, board.videoLayers, it.frame.id)
-        }
-        return first?.frame?.src?.let { stills[it] }
-    }
-    val sc = clip.linkedFrameId?.let { LyreClip.clipOf(board.scenes, it) }
-    return sc?.frame?.src?.let { stills[it] }
 }
 
 private fun fmtTime(sec: Float): String {

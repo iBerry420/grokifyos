@@ -6,7 +6,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node reasoning-effort.test.js && node prompt-context.test.js"
+    "test": "node reasoning-effort.test.js && node prompt-context.test.js && node usage-harvest.test.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

@@ -1,0 +1,21 @@
+[Unit]
+Description=CexBot trading desk (loopback :4200)
+After=network-online.target mysql.service mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/var/www/cexbot/backend
+EnvironmentFile=/var/www/cexbot/backend/.env.local
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node dist/index.js
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cexbot
+
+[Install]
+WantedBy=multi-user.target

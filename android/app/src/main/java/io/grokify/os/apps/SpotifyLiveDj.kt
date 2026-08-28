@@ -112,6 +112,12 @@ private const val KEY_CITY = "listener_city_v1"
 private const val KEY_NAME = "listener_name_v1"
 /** Editable prompt templates (research / behavior / system cores). */
 private const val KEY_PROMPTS = "prompt_templates_v1"
+/** Recently drawn research angle ids (newest first) so the lottery rotates. */
+private const val KEY_RECENT_RESEARCH = "prompt_recent_research_ids_v1"
+/** Recently drawn banter-bit ids (newest first). */
+private const val KEY_RECENT_BANTER = "prompt_recent_banter_ids_v1"
+private const val RECENT_RESEARCH_CAP = 4
+private const val RECENT_BANTER_CAP = 3
 /** Active behavior template id (built-in or custom). */
 private const val KEY_ACTIVE_BEHAVIOR_ID = "active_behavior_prompt_id_v1"
 /**
@@ -403,8 +409,8 @@ enum class DjBehaviorMode {
 }
 
 /**
- * Research angles the Live DJ can pull before banter.
- * Each banter cycle randomly picks 1–2 so facts / lyrics / shows / X / radio color rotate.
+ * Legacy built-in research angle ids. Live packs now come from
+ * [pickResearchTemplates] (enabled prompt templates, custom included as a peer).
  */
 enum class DjResearchAngle {
     LyricsThemes,
@@ -996,6 +1002,20 @@ class SpotifyDjStore(context: Context) {
     fun setTemplateEnabled(id: String, enabled: Boolean) {
         val t = templateById(id) ?: return
         upsertPromptTemplate(t.copy(enabled = enabled))
+    }
+
+    fun recentResearchIds(): List<String> = decodeStringList(prefs.getString(KEY_RECENT_RESEARCH, null))
+
+    fun recentBanterIds(): List<String> = decodeStringList(prefs.getString(KEY_RECENT_BANTER, null))
+
+    fun rememberResearchPick(ids: List<String>) {
+        val next = rememberRecentPromptIds(recentResearchIds(), ids, RECENT_RESEARCH_CAP)
+        prefs.edit().putString(KEY_RECENT_RESEARCH, encodeStringList(next)).apply()
+    }
+
+    fun rememberBanterPick(ids: List<String>) {
+        val next = rememberRecentPromptIds(recentBanterIds(), ids, RECENT_BANTER_CAP)
+        prefs.edit().putString(KEY_RECENT_BANTER, encodeStringList(next)).apply()
     }
 
     private fun encodeStringList(items: List<String>): String {
@@ -2562,6 +2582,10 @@ class SpotifyLiveDjService : Service() {
     /** Cached research bullets for banter (keyed by next track URI). */
     private var researchedForUri: String? = null
     private var researchedFacts: List<String> = emptyList()
+    /** One lottery draw per talk target so research + banter share the same pack. */
+    private val talkPackLock = Any()
+    private var talkPackForUri: String? = null
+    private var talkPack: DjTalkPack? = null
 
     /** In-memory chat timeline (also mirrored on SpotifyDjBus). */
     private val chatLog = ArrayList<DjChatMessage>(64)
@@ -3797,6 +3821,41 @@ class SpotifyLiveDjService : Service() {
             researchedForUri = null
             researchedFacts = emptyList()
         }
+        clearTalkPackUnless(plan?.targetUri)
+    }
+
+    /** Stable lottery pack for this talk target (research + banter bits). */
+    private fun talkPackFor(nextUri: String?): DjTalkPack {
+        val uri = nextUri.orEmpty()
+        synchronized(talkPackLock) {
+            val held = talkPack
+            if (uri.isNotBlank() && talkPackForUri == uri && held != null) return held
+            val pack = pickDjTalkPack(
+                all = store.loadPromptTemplates(),
+                recentResearchIds = store.recentResearchIds(),
+                recentBanterIds = store.recentBanterIds(),
+            )
+            if (uri.isNotBlank()) {
+                talkPackForUri = uri
+                talkPack = pack
+                store.rememberResearchPick(pack.research.map { it.id })
+                store.rememberBanterPick(pack.banterBits.map { it.id })
+                Log.i(
+                    TAG,
+                    "talk pack for $uri research=${pack.research.map { it.id }} " +
+                        "banter=${pack.banterBits.map { it.id }}",
+                )
+            }
+            return pack
+        }
+    }
+
+    private fun clearTalkPackUnless(keepUri: String?) {
+        synchronized(talkPackLock) {
+            if (!keepUri.isNullOrBlank() && talkPackForUri == keepUri) return
+            talkPackForUri = null
+            talkPack = null
+        }
     }
 
     /** Delete pre-baked TTS file and clear duration. */
@@ -4548,10 +4607,10 @@ class SpotifyLiveDjService : Service() {
                 withContext(Dispatchers.IO) {
                     val next = synchronized(queue) { queue.firstOrNull() }
                     if (next == null) {
-                        // Empty set — adopt foreign cut only so we have a seed, then fill.
+                        // Empty set — adopt foreign cut only so we have a seed.
+                        // Refill after the transition lock drops (skip must stay free).
                         adoptExternalCurrent(track, playing, progressMs, durationMs)
                         persistRuntimeState()
-                        fillQueue(useAi = store.useAiRank, force = true, replace = false)
                         return@withContext
                     }
                     if (countTowardBanter && lastBanterCountedPlayUri != next.uri) {
@@ -4576,9 +4635,6 @@ class SpotifyLiveDjService : Service() {
                         )
                     }
                     persistRuntimeState()
-                    if (synchronized(queue) { queue.size } < 4 && !filling.get()) {
-                        fillQueue(useAi = store.useAiRank)
-                    }
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -4588,6 +4644,7 @@ class SpotifyLiveDjService : Service() {
             } finally {
                 transitioning.set(false)
                 publish(transitioning = false)
+                requestQueueFill()
             }
         }
     }
@@ -4686,8 +4743,10 @@ class SpotifyLiveDjService : Service() {
         )
         try {
             withContext(Dispatchers.IO) {
-                if (queue.size < 2) {
-                    fillQueue(useAi = store.useAiRank, force = true)
+                // Never crawl/rank inside this lock when a next cut already exists.
+                // A 3-song list used to block Skip here for the entire fill.
+                if (djMustWaitForFillBeforeAdvance(synchronized(queue) { queue.size })) {
+                    waitForQueueHeadAfterFill()
                 }
                 // Peek only — do not remove until we actually advance via playTrack.
                 var next = synchronized(queue) { queue.firstOrNull() }
@@ -4741,9 +4800,7 @@ class SpotifyLiveDjService : Service() {
                             scope.launch(Dispatchers.IO) { prefetchBanter(prevSnap, nextSnap) }
                         }
                         // Longer budget when talk-over is off (must have audio before pause).
-                        val needCustomResearch = collectBanterTalkingPoints(
-                            store.loadPromptTemplates(),
-                        ).any { !it.builtIn }
+                        val needCustomResearch = talkPackFor(next.uri).hasCustomResearch
                         val waitBudget = banterHandoffWaitBudgetMs(
                             prefetchInFlight = prefetchingBanter.get() ||
                                 prefetchedForUri != next.uri ||
@@ -4837,18 +4894,12 @@ class SpotifyLiveDjService : Service() {
                         else -> {
                             val until = tracksUntilTalk(songsSinceBanter, banterEvery)
                             val look = peekUpcoming((until.coerceAtLeast(1) + 2).coerceIn(1, 6))
-                            val customPending = collectBanterTalkingPoints(
-                                store.loadPromptTemplates(),
-                            ).any { !it.builtIn }
-                            val haveCustomFacts = banterNext != null &&
-                                researchedForUri == banterNext.uri &&
-                                researchHasUsableCustomBeat(researchedFacts)
+                            val haveFacts = banterNext != null &&
+                                researchedForUri == banterNext.uri
                             generateBanter(
                                 banterPrev,
                                 banterNext,
-                                allowResearch = customPending &&
-                                    !haveCustomFacts &&
-                                    !prefetchingBanter.get(),
+                                allowResearch = !haveFacts && !prefetchingBanter.get(),
                                 upcoming = look,
                                 tracksUntilTalk = until,
                             )
@@ -5169,7 +5220,6 @@ class SpotifyLiveDjService : Service() {
                         )
                     } else if (next == null) {
                         publish(status = "No next track — refill queue", error = "empty_queue")
-                        fillQueue(useAi = store.useAiRank, force = true)
                     } else {
                         publish(
                             status = "Play failed — open Spotify on a device",
@@ -5231,7 +5281,6 @@ class SpotifyLiveDjService : Service() {
                         )
                     } else if (next == null) {
                         publish(status = "No next track — refill queue", error = "empty_queue")
-                        fillQueue(useAi = store.useAiRank, force = true)
                     } else {
                         publish(
                             status = "Play failed — open Spotify on a device",
@@ -5240,9 +5289,6 @@ class SpotifyLiveDjService : Service() {
                     }
                 }
                 persistRuntimeState()
-                if (queue.size < 4) {
-                    fillQueue(useAi = store.useAiRank)
-                }
             }
         } catch (e: CancellationException) {
             throw e
@@ -5283,6 +5329,8 @@ class SpotifyLiveDjService : Service() {
                     }
                 },
             )
+            // Top-up AFTER the lock so Skip / double-tap stay live during pool/AI.
+            requestQueueFill()
         }
     }
 
@@ -5315,6 +5363,7 @@ class SpotifyLiveDjService : Service() {
         pendingBanterForUri = null
         researchedForUri = null
         researchedFacts = emptyList()
+        clearTalkPackUnless(null)
         publish(status = "Jumping in queue…", transitioning = true)
         try {
             withContext(Dispatchers.IO) {
@@ -5379,9 +5428,6 @@ class SpotifyLiveDjService : Service() {
                     )
                 }
                 persistRuntimeState()
-                if (queue.size < 4) {
-                    fillQueue(useAi = store.useAiRank)
-                }
             }
         } catch (e: CancellationException) {
             throw e
@@ -5393,6 +5439,7 @@ class SpotifyLiveDjService : Service() {
             transitioning.set(false)
             persistRuntimeState()
             publish(transitioning = false)
+            requestQueueFill()
         }
     }
 
@@ -7093,6 +7140,43 @@ class SpotifyLiveDjService : Service() {
     }
 
     /**
+     * Background top-up. Never call [fillQueue] while [transitioning] is held —
+     * Skip used to freeze on a 3-song list while pool/AI ran.
+     */
+    private fun requestQueueFill(force: Boolean = false) {
+        if (filling.get()) return
+        if (!force && !djShouldTopUpQueue(synchronized(queue) { queue.size })) return
+        scope.launch(Dispatchers.IO) {
+            fillQueue(useAi = store.useAiRank, force = force)
+        }
+    }
+
+    /**
+     * Empty-queue only: start a fill and wait for a head (or hard-skip abort).
+     * Does not run when UP NEXT already has a cut.
+     */
+    private suspend fun waitForQueueHeadAfterFill(timeoutMs: Long = 45_000L): DjQueueTrack? {
+        if (!djMustWaitForFillBeforeAdvance(synchronized(queue) { queue.size })) {
+            return synchronized(queue) { queue.firstOrNull() }
+        }
+        publish(status = "Need a next cut — filling…", transitioning = true)
+        val fillJob = scope.launch(Dispatchers.IO) {
+            fillQueue(useAi = store.useAiRank, force = true)
+        }
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            synchronized(queue) { queue.firstOrNull() }?.let { return it }
+            if (abortBanter.get()) {
+                Log.i(TAG, "skip — abort wait on empty-queue fill")
+                break
+            }
+            if (!fillJob.isActive && !filling.get()) break
+            delay(200L)
+        }
+        return synchronized(queue) { queue.firstOrNull() }
+    }
+
+    /**
      * @param replace when true, clears the upcoming queue first and rotates seed mode
      * so the next batch feels like a *new* set (vs refill, which only appends).
      */
@@ -7915,7 +7999,7 @@ class SpotifyLiveDjService : Service() {
         val local = localBanterLine(
             prev,
             next,
-            talkingPointHint = collectBanterTalkingPoints(store.loadPromptTemplates())
+            talkingPointHint = talkingPointsForPack(talkPackFor(next?.uri))
                 .filter { !it.builtIn }
                 .joinToString(" · ") { it.label }
                 .take(80),
@@ -7939,9 +8023,8 @@ class SpotifyLiveDjService : Service() {
     }
 
     /**
-     * Tool-backed research for on-air color. Each call randomly picks 1–3
-     * [DjResearchAngle]s (lyrics, album/song facts, artist facts, shows/tours,
-     * recent X/social, radio host color) so banter stays varied. Cached per next URI.
+     * Tool-backed research for on-air color. Each talk draws 1–3 enabled
+     * research templates (built-in + custom as peers) and caches them per next URI.
      */
     private fun researchMusicFacts(
         prev: DjQueueTrack?,
@@ -7962,13 +8045,12 @@ class SpotifyLiveDjService : Service() {
         val (prevAlbum, prevYear) = spotifyAlbumMeta(prev)
         val cityLine = city.trim()
         val nameLine = listenerName.trim()
-        // Random pack from user-enabled research templates (custom + built-in).
-        val angleTemplates = pickResearchTemplates(store.loadPromptTemplates())
+        // Same lottery pack as banter for this next URI (custom is a peer, not forced).
+        val angleTemplates = talkPackFor(next?.uri).research
         val customAngles = angleTemplates.filter { !it.builtIn }
         val angleLabels = angleTemplates.joinToString(" + ") { t ->
             if (t.builtIn) t.label else "${t.label} (custom)"
         }
-        val angleIds = angleTemplates.map { it.id }.toSet()
         val angleBriefs = buildString {
             angleTemplates.forEachIndexed { i, a ->
                 val brief = applyPromptPlaceholders(
@@ -8044,15 +8126,7 @@ class SpotifyLiveDjService : Service() {
                     } else {
                         ""
                     } +
-                    if (cityLine.isNotBlank() &&
-                        (
-                            angleIds.any { it.contains("show") || it.contains("tour") } ||
-                                angleTemplates.any {
-                                    it.body.contains("SHOW", ignoreCase = true) ||
-                                        it.body.contains("TOUR", ignoreCase = true)
-                                }
-                            )
-                    ) {
+                    if (cityLine.isNotBlank() && researchFieldMask(angleTemplates).shows) {
                         "For shows: check near $cityLine AND broader tour news."
                     } else {
                         ""
@@ -8076,26 +8150,12 @@ class SpotifyLiveDjService : Service() {
                 return emptyList()
             }
             val json = extractDjJsonObject(text) ?: return emptyList()
-            val wantLyrics = angleIds.any {
-                it.contains("lyric") || it.contains("theme") || it.contains("meaning")
-            }
-            val wantShows = angleIds.any { it.contains("show") || it.contains("tour") } ||
-                angleTemplates.any {
-                    it.body.contains("SHOWS", ignoreCase = true) ||
-                        it.body.contains("TOUR", ignoreCase = true)
-                }
-            val wantSocial = angleIds.any { it.contains("x_social") || it.contains("social") } ||
-                angleTemplates.any {
-                    it.body.contains("X / SOCIAL", ignoreCase = true) ||
-                        it.body.contains("X/social", ignoreCase = true)
-                }
-            val wantRadio = angleIds.any {
-                it.contains("radio") || it.contains("host") || it.contains("color")
-            } || angleTemplates.any { it.body.contains("RADIO HOST", ignoreCase = true) }
-            val wantAlbumArtist = angleIds.any {
-                it.contains("album") || it.contains("song_fact") || it.contains("artist_fact") ||
-                    it.contains("fact")
-            } || angleTemplates.isNotEmpty()
+            val fieldMask = researchFieldMask(angleTemplates)
+            val wantLyrics = fieldMask.lyrics
+            val wantShows = fieldMask.shows
+            val wantSocial = fieldMask.social
+            val wantRadio = fieldMask.radio
+            val wantAlbumArtist = fieldMask.albumArtist
             val customLabels = customAngles.map { it.label }
             var out = formatDjResearchBullets(
                 json = json,
@@ -8263,7 +8323,8 @@ class SpotifyLiveDjService : Service() {
             tracksUntilTalk = tracksUntilTalk,
         )
 
-        val talkingPointsEarly = collectBanterTalkingPoints(store.loadPromptTemplates())
+        val cyclePack = talkPackFor(next?.uri)
+        val talkingPointsEarly = talkingPointsForPack(cyclePack)
         val wordCap = when {
             unhingedMode -> 75
             talkingPointsEarly.any { !it.builtIn } -> 70

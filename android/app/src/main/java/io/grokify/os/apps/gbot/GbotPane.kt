@@ -273,6 +273,8 @@ fun GbotPane(onBack: () -> Unit) {
             val bits = mutableListOf<String>()
             bits += if (auth?.kind == "logged-in") "signed in" else (auth?.kind ?: "auth?")
             if (auth?.boxConnected == true) bits += "box"
+            if (parsed.computer?.registered == true) bits += parsed.computer.computerLabel.ifBlank { "computer" }
+            else if (parsed.computer != null) bits += "computer off"
             if (health?.busy == true) bits += if (health.busyOnlyAwaitingApproval) "awaiting you" else "busy"
             if (parsed.pending.isNotEmpty()) bits += "${parsed.pending.size} pending"
             statusLine = bits.joinToString(" · ")
@@ -1053,6 +1055,11 @@ fun GbotPane(onBack: () -> Unit) {
                         },
                         onPublishSkill = { workflowId ->
                             publishWorkflowId = workflowId
+                        },
+                        onRegisterComputer = {
+                            runOp("Registering computer…") {
+                                requireOk(withContext(Dispatchers.IO) { api.registerComputer() })
+                            }
                         },
                         onShareBot = {
                             val id = selectedAgentId
@@ -2542,6 +2549,7 @@ private fun GbotSetupTab(
     onApproveJoin: (String, Boolean) -> Unit = { _, _ -> },
     onPublishSkill: (String) -> Unit = {},
     onShareBot: () -> Unit = {},
+    onRegisterComputer: () -> Unit = {},
 ) {
     val uriHandler = LocalUriHandler.current
     Column(
@@ -2563,6 +2571,41 @@ private fun GbotSetupTab(
                 Text("Update VM host now", color = GrokifyColors.GlowAmber)
             }
         }
+        Spacer(Modifier.height(16.dp))
+        GbotSectionLabel("THIS COMPUTER")
+        val computer = snapshot?.computer
+        GbotInfoRow(
+            "Status",
+            when {
+                computer?.registered == true -> "registered"
+                computer?.enabled == true -> "starting"
+                computer != null -> "not registered"
+                else -> "—"
+            },
+        )
+        GbotInfoRow("Id", computer?.computerId?.ifBlank { "—" } ?: "—")
+        GbotInfoRow("Label", computer?.computerLabel?.ifBlank { "—" } ?: "—")
+        GbotInfoRow("Host name", computer?.hostname?.ifBlank { "—" } ?: "—")
+        GbotInfoRow(
+            "Sidecar",
+            when {
+                computer?.pid != null -> "pid ${computer.pid}"
+                computer?.overlayPresent == false -> "overlay missing"
+                else -> "stopped"
+            },
+        )
+        Text(
+            "Bots can only use the webserver on this box after it is registered as a local computer.",
+            color = GrokifyColors.TextDim,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(top = 6.dp, bottom = 4.dp),
+        )
+        Button(
+            onClick = onRegisterComputer,
+            enabled = !busy,
+            colors = ButtonDefaults.buttonColors(containerColor = GrokifyColors.GlowMint, contentColor = Color(0xFF041016)),
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(if (computer?.registered == true) "Re-register this computer" else "Register this computer") }
         Spacer(Modifier.height(16.dp))
         GbotSectionLabel("ALERTS")
         Row(verticalAlignment = Alignment.CenterVertically) {

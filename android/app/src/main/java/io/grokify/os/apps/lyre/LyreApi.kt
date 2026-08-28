@@ -1,6 +1,7 @@
 package io.grokify.os.apps.lyre
 
 import io.grokify.os.BuildConfig
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -42,10 +43,52 @@ class LyreApi(private val tokenProvider: () -> String?) {
     fun saveBoard(id: String, data: JSONObject): JSONObject =
         post(JSONObject().put("action", "save_board").put("id", id).put("data", data))
 
+    fun putStorage(key: String, bytes: ByteArray, mime: String = "application/octet-stream"): JSONObject {
+        val url = (BuildConfig.API_BASE.trimEnd('/') + "/lyre.php").toHttpUrlOrNull()
+            ?.newBuilder()
+            ?.addQueryParameter("action", "storage_put")
+            ?.addQueryParameter("key", key)
+            ?.build()
+        val body = bytes.toRequestBody(mime.toMediaType())
+        val req = if (url != null) {
+            Request.Builder().url(url).also { b ->
+                tokenProvider()?.takeIf { it.isNotBlank() }?.let {
+                    b.header("Authorization", "Bearer $it")
+                }
+            }.post(body).build()
+        } else {
+            val encoded = URLEncoder.encode(key, "UTF-8")
+            auth("/lyre.php?action=storage_put&key=$encoded").post(body).build()
+        }
+        return executeStream(req)
+    }
+
+    fun imagineStill(body: JSONObject): JSONObject =
+        post(body.put("action", "imagine_still"))
+
+    fun imagineVideo(body: JSONObject): JSONObject =
+        post(body.put("action", "imagine_video"))
+
+    fun imagineStatus(requestId: String): JSONObject =
+        get("imagine_status&request_id=" + enc(requestId))
+
     /** Raw 200 body. Caller must close. JSON error body if !isSuccessful. */
     fun getStorage(key: String): Response {
-        val encoded = URLEncoder.encode(key, "UTF-8")
-        val req = auth("/lyre.php?action=storage_get&key=$encoded").get().build()
+        val url = (BuildConfig.API_BASE.trimEnd('/') + "/lyre.php").toHttpUrlOrNull()
+            ?.newBuilder()
+            ?.addQueryParameter("action", "storage_get")
+            ?.addQueryParameter("key", key)
+            ?.build()
+        val req = if (url != null) {
+            Request.Builder().url(url).also { b ->
+                tokenProvider()?.takeIf { it.isNotBlank() }?.let {
+                    b.header("Authorization", "Bearer $it")
+                }
+            }.get().build()
+        } else {
+            val encoded = URLEncoder.encode(key, "UTF-8")
+            auth("/lyre.php?action=storage_get&key=$encoded").get().build()
+        }
         return streamClient.newCall(req).execute()
     }
 
@@ -71,22 +114,32 @@ class LyreApi(private val tokenProvider: () -> String?) {
 
     private fun execute(req: Request): JSONObject {
         return try {
-            jsonClient.newCall(req).execute().use { resp ->
-                val text = resp.body?.string().orEmpty()
-                val json = try {
-                    JSONObject(if (text.isBlank()) "{}" else text)
-                } catch (_: Exception) {
-                    JSONObject().put("ok", false).put("error", "invalid_json")
-                }
-                if (!resp.isSuccessful && !json.has("error")) {
-                    json.put("error", "http_${resp.code}")
-                }
-                if (!resp.isSuccessful) json.put("ok", false)
-                json
-            }
+            jsonClient.newCall(req).execute().use { resp -> parseJson(resp) }
         } catch (e: Exception) {
             JSONObject().put("ok", false).put("error", e.message ?: "request_failed")
         }
+    }
+
+    private fun executeStream(req: Request): JSONObject {
+        return try {
+            streamClient.newCall(req).execute().use { resp -> parseJson(resp) }
+        } catch (e: Exception) {
+            JSONObject().put("ok", false).put("error", e.message ?: "request_failed")
+        }
+    }
+
+    private fun parseJson(resp: Response): JSONObject {
+        val text = resp.body?.string().orEmpty()
+        val json = try {
+            JSONObject(if (text.isBlank()) "{}" else text)
+        } catch (_: Exception) {
+            JSONObject().put("ok", false).put("error", "invalid_json")
+        }
+        if (!resp.isSuccessful && !json.has("error")) {
+            json.put("error", "http_${resp.code}")
+        }
+        if (!resp.isSuccessful) json.put("ok", false)
+        return json
     }
 
     private fun enc(value: String): String = URLEncoder.encode(value, "UTF-8")

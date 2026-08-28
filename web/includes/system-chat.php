@@ -6,6 +6,8 @@ declare(strict_types=1);
  * System chat helpers for GrokifyOS (sessions, audit, bridge, Grok Build usage).
  */
 
+require_once __DIR__ . '/usage-tracker.php';
+
 function gos_system_chat_tables_ready(): bool
 {
     static $ready = null;
@@ -1020,7 +1022,10 @@ function gos_devices_for_user(int $userId): array
 
 function gos_apk_storage_dir(): string
 {
-    $dir = gos_root() . '/storage/apk';
+    $override = gos_env('GROKIFY_APK_DIR');
+    $dir = (is_string($override) && $override !== '')
+        ? rtrim($override, '/')
+        : (gos_root() . '/storage/apk');
     if (!is_dir($dir)) {
         @mkdir($dir, 0750, true);
     }
@@ -1279,6 +1284,16 @@ function gos_register_apk_upload(
 function gos_apk_absolute_path(array $release): string
 {
     $path = (string) ($release['file_path'] ?? '');
+    $name = (string) ($release['file_name'] ?? '');
+    if ($name === '' && $path !== '') {
+        $name = basename($path);
+    }
+    if ($name !== '') {
+        $stored = gos_apk_storage_dir() . '/' . $name;
+        if (is_readable($stored) || $path === '' || !str_starts_with($path, '/')) {
+            return $stored;
+        }
+    }
     if ($path === '') {
         return '';
     }

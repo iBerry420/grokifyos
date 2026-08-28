@@ -1,0 +1,107 @@
+# HTTP: ACME + redirect. TLS vhost added by certbot or copied below.
+<VirtualHost *:80>
+    ServerName cexbot.grokpot.io
+    ServerAdmin webmaster@grokpot.io
+
+    Alias /.well-known/acme-challenge /var/www/html/.well-known/acme-challenge
+    <Directory /var/www/html/.well-known/acme-challenge>
+        Options None
+        AllowOverride None
+        Require all granted
+    </Directory>
+
+    RewriteEngine On
+    RewriteCond %{REQUEST_URI} !^/\.well-known/acme-challenge/
+    RewriteRule ^ https://cexbot.grokpot.io%{REQUEST_URI} [R=301,L,NE]
+
+    ErrorLog ${APACHE_LOG_DIR}/cexbot.grokpot.io_error.log
+    CustomLog ${APACHE_LOG_DIR}/cexbot.grokpot.io_access.log combined
+</VirtualHost>
+
+<IfModule mod_ssl.c>
+<VirtualHost *:443>
+    ServerName cexbot.grokpot.io
+    ServerAdmin webmaster@grokpot.io
+
+    DocumentRoot /var/www/cexbot/frontend
+    DirectoryIndex index.php login.php
+
+    <Directory /var/www/cexbot/frontend>
+        Options -Indexes +FollowSymLinks
+        AllowOverride None
+        Require all granted
+        <FilesMatch \.php$>
+            SetHandler application/x-httpd-php
+        </FilesMatch>
+        <IfModule mod_rewrite.c>
+            RewriteEngine On
+            RewriteCond %{HTTP:Authorization} .
+            RewriteRule ^ - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+        </IfModule>
+    </Directory>
+
+    <Directory /var/www/cexbot/frontend/includes>
+        Require all denied
+    </Directory>
+    <Directory /var/www/cexbot/frontend/tests>
+        Require all denied
+    </Directory>
+
+    <FilesMatch "(\.env|\.secret|config\.php)$">
+        Require all denied
+    </FilesMatch>
+
+    Alias /.well-known/acme-challenge /var/www/html/.well-known/acme-challenge
+    <Directory /var/www/html/.well-known/acme-challenge>
+        Options None
+        AllowOverride None
+        Require all granted
+    </Directory>
+
+    ProxyPreserveHost On
+    ProxyRequests Off
+
+    # Forward Authorization through the proxy (PHP never sees /api or /bot/v1)
+    RewriteEngine On
+    RewriteCond %{HTTP:Authorization} .
+    RewriteRule ^ - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+    # Tokenized MCP connector (do not proxy; token lives in the path)
+    RewriteRule ^/mcp(?:\.php)?(/.*)?$ /mcp.php [QSA,L]
+
+    RewriteCond %{HTTP:Upgrade} websocket [NC]
+    RewriteCond %{HTTP:Connection} upgrade [NC]
+    RewriteRule ^/ws$ ws://127.0.0.1:4200/ws [P,L]
+
+    ProxyPass /api http://127.0.0.1:4200/api
+    ProxyPassReverse /api http://127.0.0.1:4200/api
+    ProxyPass /bot/v1 http://127.0.0.1:4200/bot/v1
+    ProxyPassReverse /bot/v1 http://127.0.0.1:4200/bot/v1
+    ProxyPass /uploads http://127.0.0.1:4200/uploads
+    ProxyPassReverse /uploads http://127.0.0.1:4200/uploads
+    ProxyPass /ws ws://127.0.0.1:4200/ws
+    ProxyPassReverse /ws ws://127.0.0.1:4200/ws
+
+    # Do not proxy /bridge
+
+    <IfModule mod_headers.c>
+        Header always unset Server
+        Header always set X-Content-Type-Options "nosniff"
+        Header always set Referrer-Policy "strict-origin-when-cross-origin"
+        Header always set X-Frame-Options "SAMEORIGIN"
+        Header always set X-Robots-Tag "noindex, nofollow"
+        Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    </IfModule>
+
+    ErrorLog ${APACHE_LOG_DIR}/cexbot.grokpot.io_ssl_error.log
+    LogFormat "%h %l %u %t \"MCP /mcp/[redacted] %H\" %>s %b \"%{Referer}i\" \"%{User-Agent}i\"" cex_mcp_redacted
+    SetEnvIf Request_URI "^/mcp" cex_mcp_req
+    CustomLog ${APACHE_LOG_DIR}/cexbot.grokpot.io_ssl_access.log cex_mcp_redacted env=cex_mcp_req
+    CustomLog ${APACHE_LOG_DIR}/cexbot.grokpot.io_ssl_access.log combined env=!cex_mcp_req
+
+    SSLEngine on
+    SSLCertificateFile /etc/letsencrypt/live/cexbot.grokpot.io/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/cexbot.grokpot.io/privkey.pem
+    Include /etc/letsencrypt/options-ssl-apache.conf
+</VirtualHost>
+</IfModule>

@@ -8,6 +8,7 @@
 /storage/logs/*
 !/storage/logs/.gitkeep
 /storage/grok-auth.json
+/storage/discord-jwt.json
 /bridge/node_modules/
 /android/.gradle/
 /android/**/build/

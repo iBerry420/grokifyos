@@ -126,6 +126,61 @@ class LyreClipMovieTest {
     }
 
     @Test
+    fun stitchedMembersCollapseToLockedMovieOnPictureLane() {
+        val board = unstitched()
+        val drawn = LyreEdits.pictureVideoClips(board)
+        assertEquals(listOf("lc_a", "lc_b"), drawn.map { it.id })
+        assertFalse(LyreMovie.isStitchedMember(board.movie, "lc_a"))
+        assertFalse(LyreMovie.isStitchedFrame(board.movie, board.videoLayers, "fr_a"))
+
+        val stitched = board.copy(
+            movie = BoardMovie(
+                src = "boards/lyre/movie.mp4",
+                durationSec = 7.0,
+                parts = listOf(
+                    MoviePart("lc_a", "boards/lyre/clips/lc_a.mp4", 4.0),
+                    MoviePart("lc_b", "boards/lyre/clips/lc_b.mp4", 3.0),
+                ),
+            ),
+        )
+        assertTrue(LyreMovie.isStitchedMember(stitched.movie, "lc_a"))
+        assertTrue(LyreMovie.isStitchedMember(stitched.movie, "lc_b"))
+        assertTrue(LyreMovie.isStitchedFrame(stitched.movie, stitched.videoLayers, "fr_a"))
+        assertTrue(LyreMovie.isStitchedFrame(stitched.movie, stitched.videoLayers, "fr_b"))
+        assertFalse(LyreMovie.isStitchedFrame(stitched.movie, stitched.videoLayers, "fr_hold"))
+        val collapsed = LyreEdits.pictureVideoClips(stitched)
+        assertEquals(listOf("lc_movie"), collapsed.map { it.id })
+        assertEquals(0.0, collapsed[0].startSec, 0.0)
+        assertEquals(7.0, collapsed[0].durationSec, 0.0)
+        assertEquals("Movie · 2", collapsed[0].name)
+    }
+
+    @Test
+    fun trimAndMoveIgnoreStitchedMoviePicture() {
+        val stitched = unstitched().copy(
+            movie = BoardMovie(
+                src = "boards/lyre/movie.mp4",
+                durationSec = 7.0,
+                parts = listOf(
+                    MoviePart("lc_a", "boards/lyre/clips/lc_a.mp4", 4.0),
+                    MoviePart("lc_b", "boards/lyre/clips/lc_b.mp4", 3.0),
+                ),
+            ),
+        )
+        assertEquals(stitched, LyreEdits.trimStillRight(stitched, "fr_a", 9.0))
+        assertEquals(stitched, LyreEdits.trimStillLeft(stitched, "fr_b", 5.0))
+        assertEquals(stitched, LyreEdits.trimClip(stitched, "lc_a", 0.0, 2.0))
+        assertEquals(stitched, LyreEdits.trimClip(stitched, "lc_movie", 0.0, 2.0))
+        assertEquals(stitched, LyreEdits.moveStillTo(stitched, "fr_a", 8.0))
+        assertEquals(stitched, LyreEdits.moveVideoClip(stitched, "lc_b", 0.0))
+        assertFalse(LyreEdits.isPictureLocked(unstitched(), "fr_a"))
+        assertTrue(LyreEdits.isPictureLocked(stitched, "fr_a"))
+        assertTrue(LyreEdits.isPictureLocked(stitched, "fr_b"))
+        assertFalse(LyreEdits.isPictureLocked(stitched, "fr_hold"))
+        assertTrue(LyreEdits.isMovieLocked(stitched, "lc_movie"))
+    }
+
+    @Test
     fun clipLengthFloorAndSpokenEstimate() {
         val hold = frame("fr_z", "Hold", 0.0)
         assertEquals(0.1, LyreClip.clipLength(hold), 0.0)

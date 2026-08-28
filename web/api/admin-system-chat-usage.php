@@ -14,6 +14,12 @@ if ($method !== 'GET') {
 
 $force = isset($_GET['refresh']) && (string) $_GET['refresh'] !== '0' && (string) $_GET['refresh'] !== '';
 $usage = gos_grok_build_fetch_usage($force);
+$tracker = gos_usage_tracker_payload(is_array($usage) ? $usage : [], $force, $userId);
+if (!empty($tracker['ok'])) {
+    $usage['tracker'] = $tracker;
+} elseif (!isset($usage['tracker'])) {
+    $usage['tracker'] = $tracker;
+}
 
 if (empty($usage['ok'])) {
     gos_system_chat_audit('warning', 'usage', 'Usage fetch failed', [

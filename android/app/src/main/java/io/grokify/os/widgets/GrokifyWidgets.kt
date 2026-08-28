@@ -571,7 +571,7 @@ class WifiScannerWidget : AppWidgetProvider() {
             BuiltinPluginCatalog.WIFI_SCANNER,
             "Wi‑Fi Scanner",
             "Nearby nets · GPS · watchlist",
-            R.drawable.widget_ic_wifi,
+            R.drawable.plugin_ic_wifi_scanner,
         )
         ids.forEach { mgr.updateAppWidget(it, views) }
     }
@@ -584,7 +584,7 @@ class BtScannerWidget : AppWidgetProvider() {
             BuiltinPluginCatalog.BT_SCANNER,
             "Bluetooth Tracker",
             "BLE + classic · alerts",
-            R.drawable.widget_ic_bt,
+            R.drawable.plugin_ic_bt_scanner,
         )
         ids.forEach { mgr.updateAppWidget(it, views) }
     }
@@ -614,7 +614,7 @@ class PlaceNotesSmallWidget : AppWidgetProvider() {
             BuiltinPluginCatalog.PLACE_NOTES,
             "Place Notes",
             subtitle,
-            R.drawable.widget_ic_place,
+            R.drawable.plugin_ic_place_notes,
             // Always show badge so monitor can be toggled without blocking open-app taps.
             badge = if (n > 0) "$n · $monChip" else monChip,
             badgeClick = togglePi,
@@ -630,7 +630,7 @@ class SpaceXaiUsageWidget : AppWidgetProvider() {
             BuiltinPluginCatalog.SPACEXAI_USAGE,
             "SpaceXAI Usage",
             "Balance · spend · limits",
-            R.drawable.widget_ic_chart,
+            R.drawable.plugin_ic_spacexai_usage,
         )
         ids.forEach { mgr.updateAppWidget(it, views) }
     }

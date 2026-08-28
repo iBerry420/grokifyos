@@ -1,0 +1,21 @@
+# systemd --user drop-in for gbotd so GrokifyOS PHP can reach it on loopback.
+# Install:
+#   mkdir -p ~/.config/systemd/user/gbotd.service.d
+#   cp deploy/gbotd-http.conf.example ~/.config/systemd/user/gbotd.service.d/http.conf
+#   # mint token (0600, >=32 bytes) if missing:
+#   curl --unix-socket ~/.gbot/gbotd.sock -X POST http://localhost/v1/token/generate
+#   systemctl --user daemon-reload
+#   systemctl --user restart gbotd
+#
+# Then put the token value (not the path) in /etc/grokifyos/php.env:
+#   GROKIFY_GBOTD_URL=http://127.0.0.1:8780
+#   GROKIFY_GBOTD_TOKEN=...
+#
+# GBOTD_TCP_FULL_GATEWAY=1 is loopback-only full RPC. PHP still allowlists methods
+# (no deleteAgents / wipe secrets). Do not bind off 127.0.0.1 without TLS.
+
+[Service]
+Environment=GBOTD_HTTP=1
+Environment=GBOTD_BIND_HOST=127.0.0.1
+Environment=GBOTD_PORT=8780
+Environment=GBOTD_TCP_FULL_GATEWAY=1
