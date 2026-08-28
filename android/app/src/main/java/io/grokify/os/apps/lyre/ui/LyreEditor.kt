@@ -893,9 +893,9 @@ fun LyreEditor(
                         else -> LyreUploads.extension(mime, name, "m4a")
                     }
                     val key = when (kind) {
-                        "still" -> "me:stills/${LyreEdits.newId("st")}.jpg"
-                        "video" -> "me:videos/${LyreEdits.newId("vid")}.$destExt"
-                        else -> "me:audio/${LyreEdits.newId("st")}.$destExt"
+                        "still" -> LyreStorageKeys.writeKey(boardId, project.isOdysseus, "stills", LyreEdits.newId("st"), "jpg")
+                        "video" -> LyreStorageKeys.writeKey(boardId, project.isOdysseus, "videos", LyreEdits.newId("vid"), destExt)
+                        else -> LyreStorageKeys.writeKey(boardId, project.isOdysseus, "audio", LyreEdits.newId("st"), destExt)
                     }
                     val tmp = File(cache.boardDir(boardId), "tmp/${System.currentTimeMillis()}-$count.$destExt")
                     val copied = withContext(Dispatchers.IO) {
@@ -921,7 +921,7 @@ fun LyreEditor(
                         }
                         "video" -> {
                             val dur = withContext(Dispatchers.IO) { LyreUploads.durationSec(tmp) }
-                            val posterKey = "me:stills/${LyreEdits.newId("st")}.jpg"
+                            val posterKey = LyreStorageKeys.writeKey(boardId, project.isOdysseus, "stills", LyreEdits.newId("st"), "jpg")
                             val poster = File(cache.boardDir(boardId), "tmp/${System.currentTimeMillis()}-$count-poster.jpg")
                             val framed = withContext(Dispatchers.IO) { LyreUploads.firstFrameJpeg(tmp, poster) }
                             var board = LyreEdits.addVideoToLibrary(next, key, label, dur)
@@ -994,6 +994,10 @@ fun LyreEditor(
                     }
                     LyreImagineMode.GEN_VIDEO -> {
                         val fid = job.frameId ?: return@withContext
+                        val have = live.scenes.flatMap { it.frames }.firstOrNull { it.id == fid }?.videoSrc.orEmpty()
+                        if (have.isNotEmpty() && LyreStorageKeys.normalize(have) == LyreStorageKeys.normalize(src)) {
+                            return@withContext
+                        }
                         LyreEdits.addVideoToLibrary(
                             LyreEdits.attachGeneratedVideo(live, fid, src, duration),
                             src,
@@ -1033,7 +1037,14 @@ fun LyreEditor(
                     )
                     when (job.mode) {
                         LyreImagineMode.NEXT_STILL, LyreImagineMode.EDIT_STILL -> {
-                            client.generateStill(draft.prompt, sourceStill, refFiles, draft.aspect)
+                            client.generateStill(
+                                draft.prompt,
+                                sourceStill,
+                                refFiles,
+                                draft.aspect,
+                                boardId,
+                                project.isOdysseus,
+                            )
                         }
                         LyreImagineMode.GEN_VIDEO, LyreImagineMode.EDIT_VIDEO -> {
                             val clip = job.clipId?.let { id ->
@@ -1052,6 +1063,9 @@ fun LyreEditor(
                                 mode = if (job.mode == LyreImagineMode.EDIT_VIDEO) "edit" else "generate",
                                 videoKey = clip?.src?.let { LyreStorageKeys.normalize(it) },
                                 videoFile = clip?.src?.let { LyreStorageKeys.file(stills, it) },
+                                boardId = boardId,
+                                frameId = job.frameId,
+                                clipId = job.clipId,
                             )
                         }
                     }
@@ -1084,7 +1098,7 @@ fun LyreEditor(
                         LyreImagineClient(
                             api,
                             HostApiKeyStore.getValue(context, ApiKeyIds.SPACEXAI),
-                        ).pollVideo(rid)
+                        ).pollVideo(rid, boardId, project.isOdysseus)
                     }
                     val status = st.optString("status")
                     if (st.optBoolean("ok") && (status == "done" || st.optString("key").isNotBlank())) {

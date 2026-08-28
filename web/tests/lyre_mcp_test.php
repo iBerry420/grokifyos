@@ -319,7 +319,12 @@ expect_eq($names, [
     'lyre_activity',
     'lyre_create',
     'lyre_delete',
+    'lyre_edit_still',
+    'lyre_edit_video',
     'lyre_folder',
+    'lyre_generate_still',
+    'lyre_generate_video',
+    'lyre_imagine_status',
     'lyre_instructions',
     'lyre_move',
     'lyre_open',
@@ -328,7 +333,7 @@ expect_eq($names, [
     'lyre_scene',
     'lyre_snapshot',
     'lyre_trim',
-], 'PR 2 tool allowlist');
+], 'PR 3 tool allowlist');
 expect_true(!in_array('save_board', $names, true), 'save_board absent from tools/list');
 expect_true(in_array('lyre_snapshot', $names, true), 'snapshot tool listed');
 expect_true(in_array('lyre_activity', $names, true), 'activity tool listed');
@@ -348,6 +353,14 @@ $odMut = gos_lyre_mcp_run_tool('lyre_folder', ['board_id' => 'lyre', 'path' => '
 expect_eq($odMut['isError'] ?? null, true, 'Odysseus mutate isError');
 $odText = (string) ($odMut['content'][0]['text'] ?? '');
 expect_true(str_contains($odText, 'odysseus_protected'), 'Odysseus mutate is odysseus_protected');
+
+$odStill = gos_lyre_mcp_run_tool('lyre_generate_still', ['board_id' => 'lyre', 'prompt' => 'Penelope'], $access);
+expect_eq($odStill['isError'] ?? null, true, 'Odysseus generate_still isError');
+expect_true(str_contains((string) ($odStill['content'][0]['text'] ?? ''), 'odysseus_protected'), 'Odysseus generate_still protected');
+$needStill = gos_lyre_mcp_run_tool('lyre_generate_still', ['prompt' => 'Penelope'], $access);
+expect_true(str_contains((string) ($needStill['content'][0]['text'] ?? ''), 'project_required'), 'generate_still without board_id');
+$needAtt = gos_lyre_mcp_run_tool('lyre_imagine_status', ['request_id' => 'req_need_board_xx', 'attach' => true], $access);
+expect_true(str_contains((string) ($needAtt['content'][0]['text'] ?? ''), 'project_required'), 'imagine_status attach requires board_id');
 
 $bogus = gos_lyre_mcp_run_tool('not_a_tool', [], $access);
 expect_true(str_contains((string) ($bogus['content'][0]['text'] ?? ''), 'unknown_tool'), 'unknown tool name');

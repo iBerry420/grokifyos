@@ -10,10 +10,13 @@ declare(strict_types=1);
 $tmpRoot = sys_get_temp_dir() . '/lyre-director-' . bin2hex(random_bytes(4));
 @mkdir($tmpRoot . '/locks', 0777, true);
 @mkdir($tmpRoot . '/activity', 0777, true);
+@mkdir($tmpRoot . '/jobs', 0777, true);
 putenv('GOS_LYRE_LOCKS_DIR=' . $tmpRoot . '/locks');
 $_ENV['GOS_LYRE_LOCKS_DIR'] = $tmpRoot . '/locks';
 putenv('GOS_LYRE_ACTIVITY_DIR=' . $tmpRoot . '/activity');
 $_ENV['GOS_LYRE_ACTIVITY_DIR'] = $tmpRoot . '/activity';
+putenv('GOS_LYRE_JOBS_DIR=' . $tmpRoot . '/jobs');
+$_ENV['GOS_LYRE_JOBS_DIR'] = $tmpRoot . '/jobs';
 putenv('GOS_LYRE_TEST_STORE=1');
 $_ENV['GOS_LYRE_TEST_STORE'] = '1';
 
@@ -400,6 +403,105 @@ foreach (($stored['videoLayers'][0]['clips'] ?? []) as $c) {
     }
 }
 expect_eq($storedStart, 20.0, 'director leftover move under movie did not persist');
+
+$cutId = 'cut_kindfromjob01';
+gos_lyre_job_write($cutId, [
+    'request_id' => $cutId,
+    'kind' => 'stitch',
+    'status' => 'done',
+    'key' => null,
+    'movie_key' => 'boards/lyre_phone_cas-1/movie.mp4',
+    'duration' => 10,
+    'attached_at' => null,
+]);
+$cutStatus = gos_lyre_imagine_status($access, ['request_id' => $cutId, 'attach' => true]);
+expect_eq($cutStatus['kind'] ?? null, 'stitch', 'cut job kind from job not video');
+expect_eq($cutStatus['movie_key'] ?? null, 'boards/lyre_phone_cas-1/movie.mp4', 'cut job movie_key');
+expect_eq($cutStatus['key'] ?? null, null, 'cut job key stays null');
+expect_eq($cutStatus['attached'] ?? null, false, 'cut job not attached');
+
+$vidId = 'req_attach_hold_01';
+$vidKey = 'boards/lyre_phone_cas-1/videos/vid_holdtest.mp4';
+gos_lyre_job_write($vidId, [
+    'request_id' => $vidId,
+    'kind' => 'video',
+    'status' => 'done',
+    'key' => $vidKey,
+    'frame_id' => 'fr_hold',
+    'attach' => true,
+    'attached_at' => null,
+    'media_prefix' => 'boards/lyre_phone_cas-1/',
+    'duration' => 2,
+    'board_id' => $bid,
+    'project_id' => $pid,
+]);
+gos_lyre_test_put_board($bid, $unstitched, (string) (gos_lyre_test_store()['boards'][$bid]['updated_at'] ?? '2026-08-28 16:00:00.000000+00'));
+$beforeHold = gos_lyre_find_frame($unstitched, 'fr_hold');
+expect_true(empty($beforeHold['videoSrc'] ?? ''), 'fixture hold has no video');
+$poll = gos_lyre_imagine_status($access, ['request_id' => $vidId, 'attach' => true]);
+expect_eq($poll['kind'] ?? null, 'video', 'imagine status kind video');
+expect_eq($poll['attached'] ?? null, false, 'GET-equivalent status not attached');
+expect_eq($poll['key'] ?? null, $vidKey, 'status returns job key');
+$boardAfterPoll = gos_lyre_test_store()['boards'][$bid]['payload'] ?? [];
+$holdAfterPoll = gos_lyre_find_frame($boardAfterPoll, 'fr_hold');
+expect_true(empty($holdAfterPoll['videoSrc'] ?? ''), 'GET status does not attach');
+$jobAfterPoll = gos_lyre_job_read($vidId);
+expect_true(empty($jobAfterPoll['attached_at'] ?? null), 'GET status does not set attached_at');
+
+$att = gos_lyre_imagine_attach($access, [
+    'request_id' => $vidId,
+    'board_id' => $bid,
+    'frame_id' => 'fr_hold',
+]);
+expect_eq($att['ok'] ?? null, true, 'attach ok');
+expect_eq($att['attached'] ?? null, true, 'attach attached');
+$boardAfterAtt = gos_lyre_test_store()['boards'][$bid]['payload'] ?? [];
+$holdAfterAtt = gos_lyre_find_frame($boardAfterAtt, 'fr_hold');
+expect_true(gos_lyre_src_equal((string) ($holdAfterAtt['videoSrc'] ?? ''), $vidKey), 'attach writes frame.videoSrc');
+$jobAfterAtt = gos_lyre_job_read($vidId);
+expect_true(!empty($jobAfterAtt['attached_at']), 'attach sets attached_at');
+
+$stampAfterAtt = (string) (gos_lyre_test_store()['boards'][$bid]['updated_at'] ?? '');
+$att2 = gos_lyre_imagine_attach($access, [
+    'request_id' => $vidId,
+    'board_id' => $bid,
+    'frame_id' => 'fr_hold',
+]);
+expect_eq($att2['ok'] ?? null, true, 'idempotent attach ok');
+expect_eq($att2['attached'] ?? null, true, 'idempotent attached');
+expect_eq($att2['noop'] ?? null, true, 'idempotent attach skips CAS');
+expect_eq((string) (gos_lyre_test_store()['boards'][$bid]['updated_at'] ?? ''), $stampAfterAtt, 'idempotent attach no stamp change');
+
+$err = catch_error(static fn () => gos_lyre_imagine_attach($access, [
+    'request_id' => $vidId,
+]));
+expect_eq($err?->error, 'project_required', 'attach without board_id');
+
+$lockId = 'req_attach_locked_01';
+gos_lyre_job_write($lockId, [
+    'request_id' => $lockId,
+    'kind' => 'video',
+    'status' => 'done',
+    'key' => 'boards/lyre_phone_move-1/videos/vid_locked.mp4',
+    'frame_id' => 'fr_a',
+    'attach' => true,
+    'attached_at' => null,
+    'duration' => 4,
+]);
+$stitchedBefore = gos_lyre_test_store()['boards'][$bid2]['payload'] ?? $stitchedLoose;
+$err = catch_error(static fn () => gos_lyre_imagine_attach($access, [
+    'request_id' => $lockId,
+    'board_id' => $bid2,
+    'frame_id' => 'fr_a',
+]));
+expect_eq($err?->error, 'movie_locked', 'attach stitched picture 409');
+expect_eq($err?->http, 409, 'attach locked http 409');
+$stitchedAfter = gos_lyre_test_store()['boards'][$bid2]['payload'] ?? [];
+$frAAfter = gos_lyre_find_frame($stitchedAfter, 'fr_a');
+$frABefore = gos_lyre_find_frame($stitchedBefore, 'fr_a');
+expect_eq($frAAfter['videoSrc'] ?? null, $frABefore['videoSrc'] ?? null, 'locked attach does not rewrite videoSrc');
+$lockJob = gos_lyre_job_read($lockId);
+expect_true(empty($lockJob['attached_at'] ?? null), 'locked attach does not set attached_at');
 
 function lyre_director_rmdir(string $dir): void
 {

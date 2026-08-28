@@ -20,6 +20,11 @@ const GOS_LYRE_MCP_TOOL_ALLOWLIST = [
     'lyre_open',
     'lyre_snapshot',
     'lyre_folder',
+    'lyre_generate_still',
+    'lyre_edit_still',
+    'lyre_generate_video',
+    'lyre_edit_video',
+    'lyre_imagine_status',
     'lyre_scene',
     'lyre_place',
     'lyre_trim',
@@ -664,6 +669,108 @@ function gos_lyre_mcp_tool_definitions(): array
             ],
         ],
         [
+            'name' => 'lyre_generate_still',
+            'description' => 'Generate a still via Imagine into boards/{id}/stills (Odysseus refused). Optional folder_path + frame_id.',
+            'inputSchema' => [
+                'type' => 'object',
+                'properties' => [
+                    'project_id' => ['type' => 'string'],
+                    'board_id' => ['type' => 'string'],
+                    'prompt' => ['type' => 'string'],
+                    'refs' => ['type' => 'array', 'items' => ['type' => 'string'], 'description' => 'Library image ids or storage keys (max 4)'],
+                    'aspect_ratio' => ['type' => 'string'],
+                    'folder_id' => ['type' => 'string'],
+                    'folder_path' => ['type' => 'string'],
+                    'frame_id' => ['type' => 'string'],
+                    'caption' => ['type' => 'string'],
+                ],
+                'required' => ['prompt'],
+                'additionalProperties' => false,
+            ],
+        ],
+        [
+            'name' => 'lyre_edit_still',
+            'description' => 'Edit a still via Imagine. Requires frame_id or image_id. Stitched picture is movie_locked.',
+            'inputSchema' => [
+                'type' => 'object',
+                'properties' => [
+                    'project_id' => ['type' => 'string'],
+                    'board_id' => ['type' => 'string'],
+                    'prompt' => ['type' => 'string'],
+                    'refs' => ['type' => 'array', 'items' => ['type' => 'string']],
+                    'aspect_ratio' => ['type' => 'string'],
+                    'folder_id' => ['type' => 'string'],
+                    'folder_path' => ['type' => 'string'],
+                    'frame_id' => ['type' => 'string'],
+                    'image_id' => ['type' => 'string'],
+                    'caption' => ['type' => 'string'],
+                ],
+                'required' => ['prompt'],
+                'additionalProperties' => false,
+            ],
+        ],
+        [
+            'name' => 'lyre_generate_video',
+            'description' => 'Start Imagine video. Writes boards/{id}/videos on done. GET status does not attach.',
+            'inputSchema' => [
+                'type' => 'object',
+                'properties' => [
+                    'project_id' => ['type' => 'string'],
+                    'board_id' => ['type' => 'string'],
+                    'prompt' => ['type' => 'string'],
+                    'frame_id' => ['type' => 'string'],
+                    'refs' => ['type' => 'array', 'items' => ['type' => 'string']],
+                    'voices' => ['type' => 'array', 'items' => ['type' => 'string']],
+                    'duration' => ['type' => 'number'],
+                    'aspect_ratio' => ['type' => 'string'],
+                    'resolution' => ['type' => 'string'],
+                    'clip_id' => ['type' => 'string'],
+                    'attach' => ['type' => 'boolean'],
+                ],
+                'required' => ['prompt'],
+                'additionalProperties' => false,
+            ],
+        ],
+        [
+            'name' => 'lyre_edit_video',
+            'description' => 'Edit an existing clip via Imagine (40MB data-URI cap). Requires clip_id or video_key.',
+            'inputSchema' => [
+                'type' => 'object',
+                'properties' => [
+                    'project_id' => ['type' => 'string'],
+                    'board_id' => ['type' => 'string'],
+                    'prompt' => ['type' => 'string'],
+                    'frame_id' => ['type' => 'string'],
+                    'clip_id' => ['type' => 'string'],
+                    'video_key' => ['type' => 'string'],
+                    'refs' => ['type' => 'array', 'items' => ['type' => 'string']],
+                    'voices' => ['type' => 'array', 'items' => ['type' => 'string']],
+                    'duration' => ['type' => 'number'],
+                    'aspect_ratio' => ['type' => 'string'],
+                    'resolution' => ['type' => 'string'],
+                    'attach' => ['type' => 'boolean'],
+                ],
+                'required' => ['prompt'],
+                'additionalProperties' => false,
+            ],
+        ],
+        [
+            'name' => 'lyre_imagine_status',
+            'description' => 'Poll Imagine or cut job. attach=true requires board_id and CAS-attaches a done video. GET status never attaches.',
+            'inputSchema' => [
+                'type' => 'object',
+                'properties' => [
+                    'request_id' => ['type' => 'string'],
+                    'attach' => ['type' => 'boolean'],
+                    'project_id' => ['type' => 'string'],
+                    'board_id' => ['type' => 'string'],
+                    'frame_id' => ['type' => 'string'],
+                ],
+                'required' => ['request_id'],
+                'additionalProperties' => false,
+            ],
+        ],
+        [
             'name' => 'lyre_scene',
             'description' => 'Create or update a scene (does not rewrite frames). Requires board_id or project_id.',
             'inputSchema' => [
@@ -820,6 +927,26 @@ function gos_lyre_mcp_dispatch_tool(string $name, array $args, array $access): a
             return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
         case 'lyre_folder':
             $out = gos_lyre_director_folder($access, $args);
+
+            return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
+        case 'lyre_generate_still':
+            $out = gos_lyre_director_generate_still($access, $args);
+
+            return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
+        case 'lyre_edit_still':
+            $out = gos_lyre_director_edit_still($access, $args);
+
+            return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
+        case 'lyre_generate_video':
+            $out = gos_lyre_director_generate_video($access, $args);
+
+            return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
+        case 'lyre_edit_video':
+            $out = gos_lyre_director_edit_video($access, $args);
+
+            return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
+        case 'lyre_imagine_status':
+            $out = gos_lyre_director_imagine_status($access, $args);
 
             return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
         case 'lyre_scene':

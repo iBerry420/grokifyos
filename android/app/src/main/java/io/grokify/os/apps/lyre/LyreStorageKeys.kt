@@ -73,6 +73,12 @@ object LyreStorageKeys {
 
     fun isStillFile(file: File): Boolean = file.extension.lowercase() in IMAGE_EXT
 
+    /** Odysseus keeps root `me:stills|videos|audio/`. New projects write `me:boards/{boardId}/…`. */
+    fun writeKey(boardId: String, isOdysseus: Boolean, kind: String, id: String, ext: String): String {
+        val path = if (isOdysseus) "$kind/$id.$ext" else "boards/$boardId/$kind/$id.$ext"
+        return "me:$path"
+    }
+
     /** Scene stills first, then picture-compile / leftover video, then library stills, then audio. */
     fun objectKeys(board: BoardData): List<String> {
         val out = LinkedHashSet<String>()

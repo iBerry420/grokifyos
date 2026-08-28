@@ -66,6 +66,34 @@ class LyreStorageKeysTest {
     }
 
     @Test
+    fun writeKeyRootsOdysseusAndPrefixesNewProjects() {
+        assertEquals(
+            "me:stills/st_a.jpg",
+            LyreStorageKeys.writeKey("lyre", true, "stills", "st_a", "jpg"),
+        )
+        assertEquals(
+            "me:videos/vid_a.mp4",
+            LyreStorageKeys.writeKey("lyre", true, "videos", "vid_a", "mp4"),
+        )
+        assertEquals(
+            "me:boards/lyre_phone_abc/stills/st_a.jpg",
+            LyreStorageKeys.writeKey("lyre_phone_abc", false, "stills", "st_a", "jpg"),
+        )
+        assertEquals(
+            "me:boards/lyre_phone_abc/videos/vid_a.mp4",
+            LyreStorageKeys.writeKey("lyre_phone_abc", false, "videos", "vid_a", "mp4"),
+        )
+        assertEquals(
+            "boards/lyre_phone_abc/stills/st_a.jpg",
+            LyreStorageKeys.normalize("me:boards/lyre_phone_abc/stills/st_a.jpg"),
+        )
+        assertEquals(
+            "boards/lyre_phone_abc/videos/vid_a.mp4",
+            LyreStorageKeys.normalize(LyreStorageKeys.writeKey("lyre_phone_abc", false, "videos", "vid_a", "mp4")),
+        )
+    }
+
+    @Test
     fun stillSrcDetectsImagesNotVideoOrAudio() {
         assertEquals(true, LyreStorageKeys.isStillSrc("me:stills/st_a.jpg"))
         assertEquals(true, LyreStorageKeys.isStillSrc("/stills/hall-01.jpg"))

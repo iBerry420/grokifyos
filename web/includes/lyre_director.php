@@ -2238,6 +2238,48 @@ function gos_lyre_director_activity_append(array $access, array $body): array
 }
 
 /** @return array<string, mixed> */
+/**
+ * @return array{board: array<string, mixed>, folder_id: string, created: bool}
+ */
+function gos_lyre_ensure_ref_folder(array $board, string $path, string $folderIdIn = ''): array
+{
+    $path = trim(str_replace('\\', '/', $path), '/');
+    $folders = gos_lyre_arr($board['refFolders'] ?? []);
+    $hit = null;
+    foreach ($folders as $i => $folder) {
+        if (!is_array($folder)) {
+            continue;
+        }
+        if ($folderIdIn !== '' && gos_lyre_str($folder['id'] ?? '') === $folderIdIn) {
+            $hit = $i;
+            break;
+        }
+        if ($path !== '' && gos_lyre_str($folder['name'] ?? '') === $path) {
+            $hit = $i;
+            break;
+        }
+    }
+    $created = false;
+    if ($hit === null) {
+        $folderId = $folderIdIn !== '' ? $folderIdIn : gos_lyre_media_id('rf');
+        $folders[] = [
+            'id' => $folderId,
+            'name' => $path !== '' ? $path : 'Library',
+            'images' => [],
+        ];
+        $created = true;
+    } else {
+        $folderId = gos_lyre_str($folders[$hit]['id'] ?? '');
+        if ($path !== '') {
+            $folders[$hit]['name'] = $path;
+        }
+    }
+    $board['refFolders'] = $folders;
+    $board['activeFolderId'] = $folderId;
+
+    return ['board' => $board, 'folder_id' => $folderId, 'created' => $created];
+}
+
 function gos_lyre_director_folder(array $access, array $body): array
 {
     $path = trim(str_replace('\\', '/', gos_lyre_str($body['path'] ?? $body['name'] ?? '')));
@@ -2249,37 +2291,11 @@ function gos_lyre_director_folder(array $access, array $body): array
     $created = false;
     $folderId = '';
     $out = gos_lyre_director_mutate($access, $body, function (array $board) use ($path, $folderIdIn, &$created, &$folderId) {
-        $folders = gos_lyre_arr($board['refFolders'] ?? []);
-        $hit = null;
-        foreach ($folders as $i => $folder) {
-            if (!is_array($folder)) {
-                continue;
-            }
-            if ($folderIdIn !== '' && gos_lyre_str($folder['id'] ?? '') === $folderIdIn) {
-                $hit = $i;
-                break;
-            }
-            if (gos_lyre_str($folder['name'] ?? '') === $path) {
-                $hit = $i;
-                break;
-            }
-        }
-        if ($hit === null) {
-            $folderId = $folderIdIn !== '' ? $folderIdIn : gos_lyre_media_id('rf');
-            $folders[] = [
-                'id' => $folderId,
-                'name' => $path,
-                'images' => [],
-            ];
-            $created = true;
-        } else {
-            $folderId = gos_lyre_str($folders[$hit]['id'] ?? '');
-            $folders[$hit]['name'] = $path;
-        }
-        $board['refFolders'] = $folders;
-        $board['activeFolderId'] = $folderId;
+        $ens = gos_lyre_ensure_ref_folder($board, $path, $folderIdIn);
+        $created = $ens['created'];
+        $folderId = $ens['folder_id'];
 
-        return $board;
+        return $ens['board'];
     }, [
         'type' => 'folder',
         'summary' => 'Folder · ' . $path,
@@ -2501,4 +2517,558 @@ function gos_lyre_save_board(array $access, array $body): array
             'updated_at' => (string) $cas['updated_at'],
         ];
     });
+}
+
+/**
+ * @param array<string, mixed> $access
+ * @param array<string, mixed> $body
+ * @return array<string, mixed>|null
+ */
+function gos_lyre_imagine_resolve(array $access, array $body, bool $requireId): ?array
+{
+    $projectId = trim(gos_lyre_str($body['project_id'] ?? ''));
+    $boardId = trim(gos_lyre_str($body['board_id'] ?? ''));
+    if ($boardId === '') {
+        $boardId = trim(gos_lyre_str($body['id'] ?? ''));
+    }
+    if ($projectId === '' && $boardId === '') {
+        if ($requireId || gos_lyre_is_mcp($access)) {
+            gos_lyre_fail('project_required', 400);
+        }
+
+        return null;
+    }
+
+    return gos_lyre_director_resolve($access, $body, gos_lyre_is_mcp($access) || $requireId);
+}
+
+/** @return array<string, mixed>|null */
+function gos_lyre_find_frame(array $board, string $frameId): ?array
+{
+    if ($frameId === '') {
+        return null;
+    }
+    foreach (gos_lyre_arr($board['scenes'] ?? []) as $scene) {
+        if (!is_array($scene)) {
+            continue;
+        }
+        foreach (gos_lyre_arr($scene['frames'] ?? []) as $frame) {
+            if (is_array($frame) && gos_lyre_str($frame['id'] ?? '') === $frameId) {
+                return $frame;
+            }
+        }
+    }
+
+    return null;
+}
+
+/** @return array<string, mixed>|null */
+function gos_lyre_find_library_image(array $board, string $imageId): ?array
+{
+    if ($imageId === '') {
+        return null;
+    }
+    foreach (gos_lyre_arr($board['refFolders'] ?? []) as $folder) {
+        if (!is_array($folder)) {
+            continue;
+        }
+        foreach (gos_lyre_arr($folder['images'] ?? []) as $image) {
+            if (is_array($image) && gos_lyre_str($image['id'] ?? '') === $imageId) {
+                return $image;
+            }
+        }
+    }
+
+    return null;
+}
+
+/**
+ * @param list<mixed> $refs
+ * @return list<mixed>
+ */
+function gos_lyre_expand_image_refs(array $board, array $refs): array
+{
+    $out = [];
+    foreach ($refs as $ref) {
+        if (is_array($ref)) {
+            $out[] = $ref;
+            continue;
+        }
+        $s = trim((string) $ref);
+        if ($s === '') {
+            continue;
+        }
+        $img = gos_lyre_find_library_image($board, $s);
+        if (is_array($img)) {
+            $out[] = ['src' => gos_lyre_str($img['src'] ?? '')];
+            continue;
+        }
+        $frame = gos_lyre_find_frame($board, $s);
+        if (is_array($frame)) {
+            $out[] = ['src' => gos_lyre_str($frame['src'] ?? '')];
+            continue;
+        }
+        $out[] = ['src' => $s];
+    }
+
+    return $out;
+}
+
+function gos_lyre_put_ref_image(array $board, string $folderId, string $src, string $caption): array
+{
+    $image = [
+        'id' => gos_lyre_media_id('ri'),
+        'src' => $src,
+        'caption' => $caption,
+    ];
+    $folders = gos_lyre_arr($board['refFolders'] ?? []);
+    if ($folders === []) {
+        $id = $folderId !== '' ? $folderId : gos_lyre_media_id('rf');
+        $board['refFolders'] = [[
+            'id' => $id,
+            'name' => 'Library',
+            'images' => [$image],
+        ]];
+        $board['activeFolderId'] = $id;
+
+        return $board;
+    }
+    $dest = $folderId !== '' ? $folderId : gos_lyre_str($board['activeFolderId'] ?? '');
+    if ($dest === '') {
+        $dest = gos_lyre_str($folders[0]['id'] ?? '');
+    }
+    $out = [];
+    $hit = false;
+    foreach ($folders as $folder) {
+        if (!is_array($folder)) {
+            continue;
+        }
+        if (gos_lyre_str($folder['id'] ?? '') === $dest) {
+            $hit = true;
+            $imgs = gos_lyre_arr($folder['images'] ?? []);
+            $imgs[] = $image;
+            $folder['images'] = $imgs;
+        }
+        $out[] = $folder;
+    }
+    if (!$hit) {
+        $out[] = [
+            'id' => $dest !== '' ? $dest : gos_lyre_media_id('rf'),
+            'name' => 'Library',
+            'images' => [$image],
+        ];
+        $dest = gos_lyre_str($out[array_key_last($out)]['id'] ?? $dest);
+    }
+    $board['refFolders'] = $out;
+    $board['activeFolderId'] = $dest;
+
+    return $board;
+}
+
+function gos_lyre_replace_still_src(array $board, string $frameId, string $src): array
+{
+    $scenes = [];
+    foreach (gos_lyre_arr($board['scenes'] ?? []) as $scene) {
+        if (!is_array($scene)) {
+            continue;
+        }
+        $frames = [];
+        foreach (gos_lyre_arr($scene['frames'] ?? []) as $frame) {
+            if (is_array($frame) && gos_lyre_str($frame['id'] ?? '') === $frameId) {
+                $frame['src'] = $src;
+                $frame['generating'] = false;
+                $frame['generatingError'] = null;
+            }
+            $frames[] = $frame;
+        }
+        $scene['frames'] = $frames;
+        $scenes[] = $scene;
+    }
+    $board['scenes'] = $scenes;
+
+    return $board;
+}
+
+function gos_lyre_replace_library_image_src(array $board, string $imageId, string $src): array
+{
+    $folders = [];
+    foreach (gos_lyre_arr($board['refFolders'] ?? []) as $folder) {
+        if (!is_array($folder)) {
+            continue;
+        }
+        $images = [];
+        foreach (gos_lyre_arr($folder['images'] ?? []) as $image) {
+            if (is_array($image) && gos_lyre_str($image['id'] ?? '') === $imageId) {
+                $image['src'] = $src;
+            }
+            $images[] = $image;
+        }
+        $folder['images'] = $images;
+        $folders[] = $folder;
+    }
+    $board['refFolders'] = $folders;
+
+    return $board;
+}
+
+function gos_lyre_last_frame_id_with_src(array $board, string $src): ?string
+{
+    $found = null;
+    foreach (gos_lyre_arr($board['scenes'] ?? []) as $scene) {
+        if (!is_array($scene)) {
+            continue;
+        }
+        foreach (gos_lyre_arr($scene['frames'] ?? []) as $frame) {
+            if (!is_array($frame)) {
+                continue;
+            }
+            if (gos_lyre_src_equal(gos_lyre_str($frame['src'] ?? ''), $src)) {
+                $found = gos_lyre_str($frame['id'] ?? '');
+            }
+        }
+    }
+
+    return $found !== '' ? $found : null;
+}
+
+/**
+ * @param array<string, mixed> $body
+ * @return array<string, mixed>
+ */
+function gos_lyre_apply_generated_still(array $board, array $body, string $src, string $mode, ?string &$folderId, ?string &$outFrameId): array
+{
+    $folderPath = trim(str_replace('\\', '/', gos_lyre_str($body['folder_path'] ?? '')));
+    $folderPath = trim($folderPath, '/');
+    $folderIdIn = trim(gos_lyre_str($body['folder_id'] ?? ''));
+    if ($folderPath !== '') {
+        if (str_contains($folderPath, '..')) {
+            gos_lyre_fail('invalid_path', 400);
+        }
+        $ens = gos_lyre_ensure_ref_folder($board, $folderPath, $folderIdIn);
+        $board = $ens['board'];
+        $folderId = $ens['folder_id'];
+    } elseif ($folderIdIn !== '') {
+        $board['activeFolderId'] = $folderIdIn;
+        $folderId = $folderIdIn;
+    } else {
+        $folderId = gos_lyre_str($board['activeFolderId'] ?? '');
+    }
+    $caption = trim(gos_lyre_str($body['caption'] ?? ''));
+    if ($caption === '') {
+        $caption = $mode === 'edit' ? 'Edited still' : 'Generated still';
+    }
+    $board = gos_lyre_put_ref_image($board, (string) $folderId, $src, $caption);
+    $folderId = gos_lyre_str($board['activeFolderId'] ?? (string) $folderId);
+    $frameId = trim(gos_lyre_str($body['frame_id'] ?? ''));
+    $imageId = trim(gos_lyre_str($body['image_id'] ?? ''));
+    if ($frameId !== '') {
+        if (gos_lyre_is_picture_locked($board, $frameId)) {
+            gos_lyre_fail('movie_locked', 409);
+        }
+        if ($mode === 'edit') {
+            $board = gos_lyre_replace_still_src($board, $frameId, $src);
+            $outFrameId = $frameId;
+        } else {
+            $board = gos_lyre_insert_picture_after($board, $frameId, $src, $caption, 6.0);
+            $outFrameId = gos_lyre_last_frame_id_with_src($board, $src) ?? $frameId;
+        }
+    }
+    if ($mode === 'edit' && $imageId !== '') {
+        $board = gos_lyre_replace_library_image_src($board, $imageId, $src);
+    }
+
+    return $board;
+}
+
+/**
+ * @param array<string, mixed> $access
+ * @param array<string, mixed> $body
+ * @return array<string, mixed>
+ */
+function gos_lyre_imagine_still(array $access, array $body): array
+{
+    $row = gos_lyre_imagine_resolve($access, $body, false);
+
+    return gos_lyre_run_imagine_still($row, $body);
+}
+
+/**
+ * @param array<string, mixed> $access
+ * @param array<string, mixed> $body
+ * @return array<string, mixed>
+ */
+function gos_lyre_imagine_video(array $access, array $body): array
+{
+    $row = gos_lyre_imagine_resolve($access, $body, false);
+
+    return gos_lyre_run_imagine_video($access, $row, $body);
+}
+
+/**
+ * @param array<string, mixed> $access
+ * @param array<string, mixed> $body
+ * @return array<string, mixed>
+ */
+function gos_lyre_director_generate_still(array $access, array $body, string $mode = 'generate'): array
+{
+    $row = gos_lyre_imagine_resolve($access, $body, true);
+    if ($row === null) {
+        gos_lyre_fail('project_required', 400);
+    }
+    $loaded = gos_lyre_load_owned_board($access, $body, true);
+    $board = $loaded['board'];
+    $frameId = trim(gos_lyre_str($body['frame_id'] ?? ''));
+    $imageId = trim(gos_lyre_str($body['image_id'] ?? ''));
+    if ($mode === 'edit' && $frameId === '' && $imageId === '') {
+        gos_lyre_fail('frame_id_required', 400);
+    }
+    if ($frameId !== '' && gos_lyre_is_picture_locked($board, $frameId)) {
+        gos_lyre_fail('movie_locked', 409);
+    }
+    $images = $body['images'] ?? [];
+    if (!is_array($images)) {
+        $images = [];
+    }
+    $refs = $body['refs'] ?? [];
+    if (!is_array($refs)) {
+        $refs = [];
+    }
+    $images = array_merge($images, gos_lyre_expand_image_refs($board, $refs));
+    if ($mode === 'edit') {
+        $targetSrc = '';
+        if ($frameId !== '') {
+            $fr = gos_lyre_find_frame($board, $frameId);
+            $targetSrc = is_array($fr) ? gos_lyre_str($fr['src'] ?? '') : '';
+        }
+        if ($targetSrc === '' && $imageId !== '') {
+            $img = gos_lyre_find_library_image($board, $imageId);
+            $targetSrc = is_array($img) ? gos_lyre_str($img['src'] ?? '') : '';
+        }
+        if ($targetSrc !== '') {
+            array_unshift($images, ['src' => $targetSrc]);
+        }
+    }
+    $body['images'] = $images;
+    $gen = gos_lyre_run_imagine_still($row, $body);
+    $src = gos_lyre_str($gen['src'] ?? '');
+    if ($src === '') {
+        $src = gos_lyre_me_src(gos_lyre_str($gen['key'] ?? ''));
+    }
+    $folderId = null;
+    $outFrameId = $frameId !== '' ? $frameId : null;
+    $out = gos_lyre_director_mutate($access, $body, function (array $board) use ($body, $src, $mode, &$folderId, &$outFrameId) {
+        return gos_lyre_apply_generated_still($board, $body, $src, $mode, $folderId, $outFrameId);
+    }, [
+        'type' => 'imagine',
+        'summary' => $mode === 'edit' ? 'Edited still' : 'Generated still',
+        'op' => $mode === 'edit' ? 'edit_still' : 'generate_still',
+        'frameId' => $outFrameId,
+    ]);
+    $out['status'] = 'done';
+    $out['key'] = $gen['key'] ?? null;
+    $out['src'] = $src;
+    $out['kind'] = 'still';
+    $out['folder_id'] = $folderId;
+    $out['frame_id'] = $outFrameId;
+
+    return $out;
+}
+
+/**
+ * @param array<string, mixed> $access
+ * @param array<string, mixed> $body
+ * @return array<string, mixed>
+ */
+function gos_lyre_director_edit_still(array $access, array $body): array
+{
+    return gos_lyre_director_generate_still($access, $body, 'edit');
+}
+
+/**
+ * @param array<string, mixed> $access
+ * @param array<string, mixed> $body
+ * @return array<string, mixed>
+ */
+function gos_lyre_director_generate_video(array $access, array $body, string $mode = 'generate'): array
+{
+    $row = gos_lyre_imagine_resolve($access, $body, true);
+    if ($row === null) {
+        gos_lyre_fail('project_required', 400);
+    }
+    $loaded = gos_lyre_load_owned_board($access, $body, true);
+    $board = $loaded['board'];
+    $frameId = trim(gos_lyre_str($body['frame_id'] ?? ''));
+    if ($frameId !== '' && gos_lyre_is_picture_locked($board, $frameId)) {
+        gos_lyre_fail('movie_locked', 409);
+    }
+    $images = $body['images'] ?? [];
+    if (!is_array($images)) {
+        $images = [];
+    }
+    $refs = $body['refs'] ?? [];
+    if (!is_array($refs)) {
+        $refs = [];
+    }
+    $images = array_merge($images, gos_lyre_expand_image_refs($board, $refs));
+    if ($frameId !== '') {
+        $fr = gos_lyre_find_frame($board, $frameId);
+        $still = is_array($fr) ? gos_lyre_str($fr['src'] ?? '') : '';
+        if ($still !== '') {
+            array_unshift($images, ['src' => $still]);
+        }
+    }
+    $body['images'] = $images;
+    if ($mode === 'edit') {
+        $body['mode'] = 'edit';
+        $clipId = trim(gos_lyre_str($body['clip_id'] ?? ''));
+        $videoKey = trim(gos_lyre_str($body['video_key'] ?? ''));
+        if ($clipId !== '' && $videoKey === '') {
+            $clip = gos_lyre_find_video_clip($board, $clipId);
+            if (is_array($clip)) {
+                $videoKey = gos_lyre_str($clip['src'] ?? '');
+            }
+        }
+        if ($videoKey !== '') {
+            $body['video_key'] = $videoKey;
+        }
+    } else {
+        $body['mode'] = 'generate';
+    }
+    if (!array_key_exists('attach', $body)) {
+        $body['attach'] = $frameId !== '';
+    }
+
+    return gos_lyre_run_imagine_video($access, $row, $body);
+}
+
+/**
+ * @param array<string, mixed> $access
+ * @param array<string, mixed> $body
+ * @return array<string, mixed>
+ */
+function gos_lyre_director_edit_video(array $access, array $body): array
+{
+    return gos_lyre_director_generate_video($access, $body, 'edit');
+}
+
+/**
+ * CAS-attach a done Imagine video. Never called from GET status.
+ *
+ * @param array<string, mixed> $access
+ * @param array<string, mixed> $body
+ * @return array<string, mixed>
+ */
+function gos_lyre_imagine_attach(array $access, array $body): array
+{
+    $requestId = trim(gos_lyre_str($body['request_id'] ?? $body['id'] ?? ''));
+    if (!gos_lyre_job_id_ok($requestId)) {
+        gos_lyre_fail('request_id_required', 400);
+    }
+    $job = gos_lyre_job_read($requestId);
+    if ($job === null) {
+        gos_lyre_fail('not_found', 404);
+    }
+    if (gos_lyre_job_kind($job) !== 'video') {
+        gos_lyre_fail('not_video', 400);
+    }
+    if (strtolower(trim((string) ($job['status'] ?? ''))) !== 'done' || empty($job['key'])) {
+        gos_lyre_fail('not_ready', 400);
+    }
+    $key = (string) $job['key'];
+    $src = gos_lyre_me_src($key);
+    $frameId = trim(gos_lyre_str($body['frame_id'] ?? ''));
+    if ($frameId === '') {
+        $frameId = trim(gos_lyre_str($job['frame_id'] ?? ''));
+    }
+    if ($frameId === '') {
+        gos_lyre_fail('frame_id_required', 400);
+    }
+    if (trim(gos_lyre_str($body['board_id'] ?? '')) === '' && trim(gos_lyre_str($body['project_id'] ?? '')) === '') {
+        gos_lyre_fail('project_required', 400);
+    }
+    if (!empty($job['attached_at'])) {
+        return [
+            'ok' => true,
+            'status' => 'done',
+            'request_id' => $requestId,
+            'key' => $key,
+            'src' => $src,
+            'kind' => 'video',
+            'attached' => true,
+            'frame_id' => $frameId,
+            'duration' => $job['duration'] ?? null,
+            'noop' => true,
+        ];
+    }
+    $duration = gos_lyre_num($job['duration'] ?? 6, 6.0);
+    $name = gos_lyre_str($body['name'] ?? '');
+    $out = gos_lyre_director_mutate($access, $body, function (array $board) use ($frameId, $src, $key, $duration, $name) {
+        $frame = gos_lyre_find_frame($board, $frameId);
+        if (is_array($frame)) {
+            $have = gos_lyre_str($frame['videoSrc'] ?? '');
+            if ($have !== '' && (gos_lyre_src_equal($have, $src) || gos_lyre_src_equal($have, $key))) {
+                return $board;
+            }
+        }
+
+        return gos_lyre_attach_generated_video($board, $frameId, $src, $duration, $name);
+    }, [
+        'type' => 'imagine',
+        'summary' => 'Attached generated video',
+        'op' => 'imagine_attach',
+        'frameId' => $frameId,
+    ]);
+    $job = gos_lyre_job_patch($requestId, [
+        'attached_at' => time(),
+        'attached' => true,
+        'frame_id' => $frameId,
+    ]);
+    $out['status'] = 'done';
+    $out['request_id'] = $requestId;
+    $out['key'] = $key;
+    $out['src'] = $src;
+    $out['kind'] = 'video';
+    $out['attached'] = true;
+    $out['frame_id'] = $frameId;
+    $out['duration'] = $job['duration'] ?? $duration;
+
+    return $out;
+}
+
+/**
+ * MCP status: GET-equivalent poll, then optional POST attach.
+ *
+ * @param array<string, mixed> $access
+ * @param array<string, mixed> $body
+ * @return array<string, mixed>
+ */
+function gos_lyre_director_imagine_status(array $access, array $body): array
+{
+    $attach = filter_var($body['attach'] ?? false, FILTER_VALIDATE_BOOLEAN);
+    if ($attach) {
+        if (trim(gos_lyre_str($body['board_id'] ?? '')) === '' && trim(gos_lyre_str($body['project_id'] ?? '')) === '') {
+            gos_lyre_fail('project_required', 400);
+        }
+    }
+    $status = gos_lyre_imagine_status($access, $body);
+    if (!$attach) {
+        return $status;
+    }
+    if (($status['status'] ?? '') !== 'done' || ($status['kind'] ?? '') !== 'video') {
+        return $status;
+    }
+    $job = gos_lyre_job_read(trim(gos_lyre_str($body['request_id'] ?? $body['id'] ?? '')));
+    $frameId = trim(gos_lyre_str($body['frame_id'] ?? ''));
+    if ($frameId === '' && is_array($job)) {
+        $frameId = trim(gos_lyre_str($job['frame_id'] ?? ''));
+    }
+    if ($frameId === '') {
+        $status['attached'] = !empty($status['attached']);
+
+        return $status;
+    }
+    $body['frame_id'] = $frameId;
+    $att = gos_lyre_imagine_attach($access, $body);
+
+    return array_merge($status, $att);
 }

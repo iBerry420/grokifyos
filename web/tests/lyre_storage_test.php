@@ -23,6 +23,11 @@ function expect_eq(mixed $got, mixed $want, string $msg): void
     }
 }
 
+function expect_true(bool $cond, string $msg): void
+{
+    expect_eq($cond, true, $msg);
+}
+
 expect_eq(gos_lyre_storage_key('me:stills/st_n05cjkwshekr.jpg'), 'stills/st_n05cjkwshekr.jpg', 'me stills');
 expect_eq(gos_lyre_storage_key('me:videos/vid_rqhfchf1vana.mp4'), 'videos/vid_rqhfchf1vana.mp4', 'me videos');
 expect_eq(gos_lyre_storage_key('me:audio/st_4s24pyzzl4qw.mp3'), 'audio/st_4s24pyzzl4qw.mp3', 'me audio');
@@ -81,6 +86,37 @@ expect_eq(gos_lyre_safe_board_id(''), null, 'safe empty');
 expect_eq(gos_lyre_safe_board_id('../'), null, 'safe rejects ../');
 expect_eq(gos_lyre_safe_board_id('..'), null, 'safe rejects ..');
 expect_eq(gos_lyre_safe_board_id('foo/../bar'), null, 'safe rejects nested traversal');
+
+$odRow = ['board_id' => 'lyre', 'is_odysseus' => 1];
+expect_eq(gos_lyre_media_prefix($odRow), '', 'odysseus prefix empty');
+$odStill = gos_lyre_media_key($odRow, 'stills', 'jpg');
+expect_true(str_starts_with($odStill, 'stills/st_'), 'odysseus stills stay at root');
+expect_eq(gos_lyre_storage_key($odStill), $odStill, 'odysseus still key is storage-safe');
+$odVid = gos_lyre_media_key($odRow, 'videos', 'mp4');
+expect_true(str_starts_with($odVid, 'videos/vid_'), 'odysseus videos stay at root');
+expect_eq(gos_lyre_storage_key($odVid), $odVid, 'odysseus video key is storage-safe');
+
+$phoneRow = ['board_id' => 'lyre_phone_abc-def', 'is_odysseus' => 0];
+expect_eq(gos_lyre_media_prefix($phoneRow), 'boards/lyre_phone_abc-def/', 'phone prefix boards/id/');
+$phStill = gos_lyre_media_key($phoneRow, 'stills', 'jpg');
+expect_true(str_starts_with($phStill, 'boards/lyre_phone_abc-def/stills/st_'), 'phone stills under boards/id');
+expect_eq(gos_lyre_storage_key($phStill), $phStill, 'phone still key is storage-safe');
+$phVid = gos_lyre_media_key($phoneRow, 'videos', 'mp4');
+expect_true(str_starts_with($phVid, 'boards/lyre_phone_abc-def/videos/vid_'), 'phone videos under boards/id');
+expect_eq(gos_lyre_storage_key($phVid), $phVid, 'phone video key is storage-safe');
+$phAud = gos_lyre_media_key($phoneRow, 'audio', 'wav');
+expect_true(str_starts_with($phAud, 'boards/lyre_phone_abc-def/audio/st_'), 'phone audio under boards/id');
+expect_eq(gos_lyre_storage_key($phAud), $phAud, 'phone audio key is storage-safe');
+expect_eq(gos_lyre_storage_key('me:boards/lyre_phone_abc/stills/st_a.jpg'), 'boards/lyre_phone_abc/stills/st_a.jpg', 'me boards still');
+expect_eq(gos_lyre_src_equal('me:videos/vid_a.mp4', 'videos/vid_a.mp4'), true, 'src equal me vs raw');
+expect_eq(gos_lyre_src_equal('me:boards/x/videos/v.mp4', 'boards/x/videos/v.mp4'), true, 'src equal board prefix');
+expect_eq(gos_lyre_src_equal('videos/a.mp4', 'videos/b.mp4'), false, 'src unequal');
+expect_eq(gos_lyre_me_src('stills/st_a.jpg'), 'me:stills/st_a.jpg', 'me src prefix');
+expect_eq(gos_lyre_me_src('me:stills/st_a.jpg'), 'me:stills/st_a.jpg', 'me src already');
+expect_eq(gos_lyre_job_kind(['kind' => 'stitch', 'key' => null, 'movie_key' => 'boards/x/movie.mp4']), 'stitch', 'job kind stitch');
+expect_eq(gos_lyre_job_kind(['kind' => 'video', 'key' => 'videos/vid_a.mp4']), 'video', 'job kind video');
+expect_eq(gos_lyre_job_kind(['movie_key' => 'boards/x/movie.mp4']), 'stitch', 'job kind from movie_key');
+expect_eq(gos_lyre_job_kind([]), 'video', 'job kind default video');
 
 if ($fails > 0) {
     fwrite(STDERR, "{$fails} failed\n");

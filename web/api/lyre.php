@@ -37,6 +37,7 @@ function gos_lyre_http_status(string $error): int
         'not_found' => 404,
         'not_deletable', 'odysseus_protected' => 403,
         'conflict', 'movie_locked', 'lock_timeout', 'not_stitch_target', 'nothing_to_pop' => 409,
+        'too_large' => 413,
         'db_error' => 500,
         'lyre_pg_unavailable', 'lyre_unconfigured' => 503,
         default => 400,
@@ -886,6 +887,61 @@ function gos_lyre_media_id(string $prefix): string
     return $prefix . '_' . $tail;
 }
 
+function gos_lyre_media_prefix(?array $row): string
+{
+    if (!is_array($row) || gos_lyre_is_odysseus_project($row)) {
+        return '';
+    }
+    $boardId = trim((string) ($row['board_id'] ?? ''));
+    if ($boardId === '' || gos_lyre_safe_board_id($boardId) === null) {
+        return '';
+    }
+
+    return 'boards/' . $boardId . '/';
+}
+
+function gos_lyre_media_key(?array $row, string $kind, string $ext): string
+{
+    $kind = strtolower(trim($kind));
+    if (!in_array($kind, ['stills', 'videos', 'audio', 'clips'], true)) {
+        $kind = 'stills';
+    }
+    $ext = strtolower(ltrim(trim($ext), '.'));
+    if ($ext === '' || preg_match('/^[a-z0-9]{1,8}$/', $ext) !== 1) {
+        $ext = $kind === 'videos' || $kind === 'clips' ? 'mp4' : ($kind === 'audio' ? 'wav' : 'jpg');
+    }
+    $id = gos_lyre_media_id($kind === 'videos' ? 'vid' : ($kind === 'clips' ? 'lc' : 'st'));
+
+    return gos_lyre_media_prefix($row) . $kind . '/' . $id . '.' . $ext;
+}
+
+function gos_lyre_src_equal(string $a, string $b): bool
+{
+    if ($a === $b) {
+        return true;
+    }
+    $ka = gos_lyre_storage_key($a);
+    $kb = gos_lyre_storage_key($b);
+    if ($ka !== null && $kb !== null) {
+        return $ka === $kb;
+    }
+
+    return false;
+}
+
+function gos_lyre_me_src(string $key): string
+{
+    $key = trim($key);
+    if ($key === '') {
+        return '';
+    }
+    if (str_starts_with($key, 'me:')) {
+        return $key;
+    }
+
+    return 'me:' . ltrim($key, '/');
+}
+
 function gos_lyre_xai_key(): string
 {
     foreach (['GROKIFY_LYRE_XAI_API_KEY', 'GROKIFY_XAI_API_KEY', 'XAI_API_KEY'] as $k) {
@@ -907,7 +963,12 @@ function gos_lyre_xai_key(): string
 
 function gos_lyre_jobs_dir(): string
 {
-    $dir = gos_root() . '/storage/lyre-jobs';
+    $override = getenv('GOS_LYRE_JOBS_DIR');
+    if (is_string($override) && $override !== '') {
+        $dir = rtrim($override, '/');
+    } else {
+        $dir = gos_root() . '/storage/lyre-jobs';
+    }
     if (!is_dir($dir)) {
         @mkdir($dir, 0775, true);
     }
@@ -942,6 +1003,36 @@ function gos_lyre_job_read(string $id): ?array
     $raw = file_get_contents($path);
     $data = is_string($raw) ? json_decode($raw, true) : null;
     return is_array($data) ? $data : null;
+}
+
+/**
+ * @param array<string, mixed> $patch
+ * @return array<string, mixed>
+ */
+function gos_lyre_job_patch(string $id, array $patch): array
+{
+    $cur = gos_lyre_job_read($id) ?? [];
+    $next = array_merge($cur, $patch);
+    if (!isset($next['request_id'])) {
+        $next['request_id'] = $id;
+    }
+    gos_lyre_job_write($id, $next);
+
+    return $next;
+}
+
+/** @param array<string, mixed> $job */
+function gos_lyre_job_kind(array $job): string
+{
+    $kind = strtolower(trim((string) ($job['kind'] ?? '')));
+    if ($kind !== '') {
+        return $kind;
+    }
+    if (!empty($job['movie_key'])) {
+        return 'stitch';
+    }
+
+    return 'video';
 }
 
 function gos_lyre_files_root(): ?string
@@ -1029,6 +1120,150 @@ function gos_lyre_grokme_put(string $key, string $bytes, string $mime): bool
     $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
     return $status >= 200 && $status < 300;
+}
+
+function gos_lyre_grokme_put_file(string $key, string $path, string $mime): bool
+{
+    $base = rtrim((string) (gos_env('GROKIFY_LYRE_ME_STORAGE_BASE', 'https://me.grokpot.io/v1/storage') ?? ''), '/');
+    $apiKey = (string) (gos_env('GROKIFY_LYRE_ME_API_KEY', '') ?? '');
+    if ($base === '' || $apiKey === '' || $key === '' || !is_file($path) || !function_exists('curl_init')) {
+        return false;
+    }
+    $size = filesize($path);
+    if ($size === false || $size <= 0) {
+        return false;
+    }
+    $fp = fopen($path, 'rb');
+    if ($fp === false) {
+        return false;
+    }
+    $url = $base . '/' . implode('/', array_map('rawurlencode', explode('/', $key)));
+    $ch = curl_init($url);
+    if ($ch === false) {
+        fclose($fp);
+        return false;
+    }
+    curl_setopt_array($ch, [
+        CURLOPT_CUSTOMREQUEST => 'PUT',
+        CURLOPT_UPLOAD => true,
+        CURLOPT_INFILE => $fp,
+        CURLOPT_INFILESIZE => (int) $size,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_CONNECTTIMEOUT => 30,
+        CURLOPT_TIMEOUT => 180,
+        CURLOPT_HTTPHEADER => [
+            'Authorization: Bearer ' . $apiKey,
+            'Content-Type: ' . $mime,
+        ],
+    ]);
+    curl_exec($ch);
+    $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    fclose($fp);
+    return $status >= 200 && $status < 300;
+}
+
+function gos_lyre_storage_write_file(string $key, string $srcPath): ?string
+{
+    $root = gos_lyre_files_root();
+    if ($root === null || $srcPath === '' || !is_file($srcPath)) {
+        return null;
+    }
+    $dest = $root . '/' . $key;
+    $dir = dirname($dest);
+    if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
+        return null;
+    }
+    $in = fopen($srcPath, 'rb');
+    if ($in === false) {
+        return null;
+    }
+    $out = fopen($dest, 'wb');
+    if ($out === false) {
+        fclose($in);
+        return null;
+    }
+    $copied = stream_copy_to_stream($in, $out);
+    fclose($in);
+    fclose($out);
+    if ($copied === false) {
+        @unlink($dest);
+        return null;
+    }
+    $real = realpath($dest);
+    $prefix = $root . DIRECTORY_SEPARATOR;
+    if (!is_string($real) || (!str_starts_with($real, $prefix) && $real !== $root)) {
+        @unlink($dest);
+        return null;
+    }
+    return $real;
+}
+
+function gos_lyre_commit_file(string $key, string $path): bool
+{
+    $wrote = gos_lyre_storage_write_file($key, $path);
+    if ($wrote === null) {
+        return false;
+    }
+    gos_lyre_grokme_put_file($key, $wrote, gos_lyre_mime_for_key($key));
+    return true;
+}
+
+/**
+ * Stream $url onto $dest. Aborts if the body exceeds $maxBytes (80MB Imagine cap).
+ *
+ * @return array{ok:bool,error:?string,bytes:int}
+ */
+function gos_lyre_http_to_file(string $url, string $dest, int $maxBytes = 83886080, int $timeout = 180): array
+{
+    if (!function_exists('curl_init') || $url === '' || $dest === '') {
+        return ['ok' => false, 'error' => 'unreachable', 'bytes' => 0];
+    }
+    $dir = dirname($dest);
+    if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
+        return ['ok' => false, 'error' => 'write_failed', 'bytes' => 0];
+    }
+    $fp = fopen($dest, 'wb');
+    if ($fp === false) {
+        return ['ok' => false, 'error' => 'write_failed', 'bytes' => 0];
+    }
+    $ch = curl_init($url);
+    if ($ch === false) {
+        fclose($fp);
+        return ['ok' => false, 'error' => 'curl_init', 'bytes' => 0];
+    }
+    $abort = false;
+    curl_setopt_array($ch, [
+        CURLOPT_FILE => $fp,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_CONNECTTIMEOUT => 20,
+        CURLOPT_TIMEOUT => $timeout,
+        CURLOPT_MAXFILESIZE => $maxBytes,
+        CURLOPT_NOPROGRESS => false,
+        CURLOPT_PROGRESSFUNCTION => static function (...$args) use ($maxBytes, &$abort): int {
+            $downloaded = (float) ($args[2] ?? 0);
+            if ($downloaded > $maxBytes) {
+                $abort = true;
+                return 1;
+            }
+            return 0;
+        },
+    ]);
+    $raw = curl_exec($ch);
+    $errno = curl_errno($ch);
+    $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    fclose($fp);
+    $size = is_file($dest) ? (int) filesize($dest) : 0;
+    if ($abort || $size > $maxBytes) {
+        @unlink($dest);
+        return ['ok' => false, 'error' => 'too_large', 'bytes' => $size];
+    }
+    if ($raw === false || $errno !== 0 || $status < 200 || $status >= 300 || $size <= 0) {
+        @unlink($dest);
+        return ['ok' => false, 'error' => 'empty_video', 'bytes' => 0];
+    }
+    return ['ok' => true, 'error' => null, 'bytes' => $size];
 }
 
 /**
@@ -1425,7 +1660,12 @@ function gos_lyre_storage_put_request(): never
     gos_lyre_storage_put_bytes($keyRaw, $bytes);
 }
 
-function gos_lyre_post_imagine_still(array $body): never
+/**
+ * @param array<string, mixed>|null $project
+ * @param array<string, mixed> $body
+ * @return array<string, mixed>
+ */
+function gos_lyre_run_imagine_still(?array $project, array $body): array
 {
     @set_time_limit(180);
     $prompt = trim((string) ($body['prompt'] ?? ''));
@@ -1436,7 +1676,7 @@ function gos_lyre_post_imagine_still(array $body): never
     }
     $uris = gos_lyre_collect_image_uris($images, 4);
     if ($uris === [] && $prompt === '') {
-        gos_api_json(['ok' => false, 'error' => 'prompt_required'], 400);
+        gos_lyre_fail('prompt_required', 400);
     }
     $tagged = gos_lyre_tag_prompt($prompt !== '' ? $prompt : 'Generate the next cinematic still in this sequence.', count($uris), 0);
     $payload = gos_lyre_image_edit_payload($tagged, $uris, $aspect);
@@ -1473,29 +1713,39 @@ function gos_lyre_post_imagine_still(array $body): never
     }
     if (!$res['ok']) {
         $code = $res['status'] === 503 ? 503 : 502;
-        gos_api_json(['ok' => false, 'error' => $res['error'] ?? 'imagine_failed'], $code);
+        gos_lyre_fail($res['error'] ?? 'imagine_failed', $code);
     }
     $bytes = is_array($res['data']) ? gos_lyre_image_result_bytes($res['data']) : null;
     if ($bytes === null) {
-        gos_api_json(['ok' => false, 'error' => 'empty_image'], 502);
+        gos_lyre_fail('empty_image', 502);
     }
-    $key = 'stills/' . gos_lyre_media_id('st') . '.jpg';
+    $key = gos_lyre_media_key($project, 'stills', 'jpg');
     if (!gos_lyre_commit_bytes($key, $bytes)) {
-        gos_api_json(['ok' => false, 'error' => 'write_failed'], 500);
+        gos_lyre_fail('write_failed', 500);
     }
-    gos_api_json([
+
+    return [
         'ok' => true,
         'status' => 'done',
         'key' => $key,
-        'src' => 'me:' . $key,
+        'src' => gos_lyre_me_src($key),
         'kind' => 'still',
-    ]);
+    ];
 }
 
-function gos_lyre_post_imagine_video(array $body): never
+/**
+ * @param array<string, mixed> $access
+ * @param array<string, mixed>|null $project
+ * @param array<string, mixed> $body
+ * @return array<string, mixed>
+ */
+function gos_lyre_run_imagine_video(array $access, ?array $project, array $body): array
 {
     $prompt = trim((string) ($body['prompt'] ?? ''));
     $mode = strtolower(trim((string) ($body['mode'] ?? 'generate')));
+    if ($mode !== 'edit') {
+        $mode = 'generate';
+    }
     $duration = (int) ($body['duration'] ?? 6);
     if ($duration < 1) {
         $duration = 6;
@@ -1520,7 +1770,7 @@ function gos_lyre_post_imagine_video(array $body): never
     $voiceIds = gos_lyre_voice_ids($voices);
     $videoUri = $mode === 'edit' ? gos_lyre_collect_video_uri($body) : null;
     if ($mode === 'edit' && $videoUri === null && $uris === []) {
-        gos_api_json(['ok' => false, 'error' => 'video_required'], 400);
+        gos_lyre_fail('video_required', 400);
     }
     $tagged = gos_lyre_tag_prompt(
         $prompt !== '' ? $prompt : ($mode === 'edit' ? 'Edit this clip as directed.' : 'Animate this still with a slow cinematic camera move.'),
@@ -1535,82 +1785,169 @@ function gos_lyre_post_imagine_video(array $body): never
     }
     if (!$res['ok']) {
         $code = $res['status'] === 503 ? 503 : 502;
-        gos_api_json(['ok' => false, 'error' => $res['error'] ?? 'imagine_failed'], $code);
+        gos_lyre_fail($res['error'] ?? 'imagine_failed', $code);
     }
     $data = is_array($res['data']) ? $res['data'] : [];
     $rid = (string) ($data['request_id'] ?? $data['id'] ?? '');
     if ($rid === '' || !gos_lyre_job_id_ok($rid)) {
-        gos_api_json(['ok' => false, 'error' => 'no_request_id'], 502);
+        gos_lyre_fail('no_request_id', 502);
+    }
+    $frameId = trim((string) ($body['frame_id'] ?? ''));
+    $clipId = trim((string) ($body['clip_id'] ?? ''));
+    $attach = array_key_exists('attach', $body)
+        ? filter_var($body['attach'], FILTER_VALIDATE_BOOLEAN)
+        : ($frameId !== '' && gos_lyre_is_mcp($access));
+    $prefix = gos_lyre_media_prefix($project);
+    $userId = 0;
+    try {
+        $userId = gos_lyre_user_id($access);
+    } catch (GosLyreException) {
+        $userId = 0;
     }
     gos_lyre_job_write($rid, [
         'request_id' => $rid,
         'kind' => 'video',
         'status' => 'pending',
-        'duration' => $duration,
         'mode' => $mode,
+        'board_id' => is_array($project) ? (string) ($project['board_id'] ?? '') : '',
+        'project_id' => is_array($project) ? (string) ($project['id'] ?? '') : '',
+        'user_id' => $userId,
+        'frame_id' => $frameId !== '' ? $frameId : null,
+        'clip_id' => $clipId !== '' ? $clipId : null,
+        'attach' => $attach,
+        'attached_at' => null,
+        'media_prefix' => $prefix,
+        'duration' => $duration,
+        'key' => null,
+        'movie_key' => null,
         'created_at' => time(),
     ]);
-    gos_api_json(['ok' => true, 'status' => 'pending', 'request_id' => $rid, 'kind' => 'video']);
+
+    return [
+        'ok' => true,
+        'status' => 'pending',
+        'request_id' => $rid,
+        'kind' => 'video',
+        'attached' => false,
+    ];
 }
 
-function gos_lyre_get_imagine_status(string $requestId): never
+/**
+ * @param array<string, mixed> $job
+ * @return array<string, mixed>
+ */
+function gos_lyre_imagine_status_payload(string $requestId, array $job): array
 {
-    if (!gos_lyre_job_id_ok($requestId)) {
-        gos_api_json(['ok' => false, 'error' => 'request_id_required'], 400);
+    $kind = gos_lyre_job_kind($job);
+    $key = isset($job['key']) && is_string($job['key']) && $job['key'] !== '' ? $job['key'] : null;
+    $movieKey = isset($job['movie_key']) && is_string($job['movie_key']) && $job['movie_key'] !== ''
+        ? $job['movie_key']
+        : null;
+    $status = strtolower(trim((string) ($job['status'] ?? 'pending')));
+    $src = null;
+    if ($key !== null) {
+        $src = gos_lyre_me_src($key);
+    } elseif ($movieKey !== null) {
+        $src = gos_lyre_me_src($movieKey);
     }
-    $job = gos_lyre_job_read($requestId);
-    if ($job !== null && ($job['status'] ?? '') === 'done' && !empty($job['key'])) {
-        gos_api_json([
-            'ok' => true,
-            'status' => 'done',
-            'request_id' => $requestId,
-            'key' => $job['key'],
-            'src' => 'me:' . $job['key'],
-            'duration' => $job['duration'] ?? null,
-            'kind' => 'video',
+
+    return [
+        'ok' => $status !== 'failed' && $status !== 'error' && $status !== 'expired',
+        'status' => $status !== '' ? $status : 'pending',
+        'request_id' => $requestId,
+        'key' => $key,
+        'src' => $src,
+        'duration' => $job['duration'] ?? null,
+        'kind' => $kind,
+        'attached' => !empty($job['attached_at']),
+        'movie_key' => $movieKey,
+        'frame_id' => isset($job['frame_id']) && $job['frame_id'] !== '' && $job['frame_id'] !== null
+            ? (string) $job['frame_id']
+            : null,
+    ];
+}
+
+/**
+ * Read-only of the board: may poll xAI and persist job JSON + object bytes. Never attaches.
+ *
+ * @param array<string, mixed> $access
+ * @param array<string, mixed> $body
+ * @return array<string, mixed>
+ */
+function gos_lyre_imagine_status(array $access, array $body): array
+{
+    unset($access);
+    $requestId = trim((string) ($body['request_id'] ?? $body['id'] ?? ''));
+    if (!gos_lyre_job_id_ok($requestId)) {
+        gos_lyre_fail('request_id_required', 400);
+    }
+    $job = gos_lyre_job_read($requestId) ?? [];
+    $kind = $job !== [] ? gos_lyre_job_kind($job) : 'video';
+    $status = strtolower(trim((string) ($job['status'] ?? '')));
+    if (in_array($kind, ['stitch', 'trim', 'pop'], true)) {
+        if ($job === []) {
+            gos_lyre_fail('not_found', 404);
+        }
+
+        return gos_lyre_imagine_status_payload($requestId, $job);
+    }
+    if ($kind === 'image' || $kind === 'still') {
+        return gos_lyre_imagine_status_payload($requestId, $job !== [] ? $job : [
+            'kind' => $kind,
+            'status' => $status !== '' ? $status : 'pending',
         ]);
+    }
+    if ($status === 'done' && !empty($job['key'])) {
+        return gos_lyre_imagine_status_payload($requestId, $job);
     }
     $res = gos_lyre_xai_json('GET', 'https://api.x.ai/v1/videos/' . rawurlencode($requestId), null, 30);
     if (!$res['ok']) {
         $code = $res['status'] === 503 ? 503 : (($res['status'] === 404) ? 404 : 502);
-        gos_api_json(['ok' => false, 'error' => $res['error'] ?? 'status_failed', 'status' => 'failed'], $code);
+        gos_lyre_fail($res['error'] ?? 'status_failed', $code, ['status' => 'failed']);
     }
     $data = is_array($res['data']) ? $res['data'] : [];
     $st = strtolower((string) ($data['status'] ?? 'pending'));
     if ($st === 'done' || $st === 'completed' || $st === 'succeeded') {
         $url = (string) ($data['video']['url'] ?? $data['url'] ?? '');
-        $bytes = $url !== '' ? gos_lyre_http_bytes($url, 180) : null;
-        if ($bytes === null) {
-            gos_api_json(['ok' => false, 'error' => 'empty_video', 'status' => 'failed'], 502);
+        if ($url === '') {
+            gos_lyre_fail('empty_video', 502, ['status' => 'failed']);
         }
-        $key = 'videos/' . gos_lyre_media_id('vid') . '.mp4';
-        if (!gos_lyre_commit_bytes($key, $bytes)) {
-            gos_api_json(['ok' => false, 'error' => 'write_failed', 'status' => 'failed'], 500);
+        $tmp = gos_lyre_jobs_dir() . '/dl_' . $requestId . '.mp4';
+        $dl = gos_lyre_http_to_file($url, $tmp, 80 * 1024 * 1024, 180);
+        if (!$dl['ok']) {
+            $err = (string) ($dl['error'] ?? 'empty_video');
+            gos_lyre_fail($err, $err === 'too_large' ? 413 : 502, ['status' => 'failed']);
         }
+        $prefix = (string) ($job['media_prefix'] ?? '');
+        if ($prefix !== '' && !str_ends_with($prefix, '/')) {
+            $prefix .= '/';
+        }
+        $key = $prefix . 'videos/' . gos_lyre_media_id('vid') . '.mp4';
+        if (!gos_lyre_commit_file($key, $tmp)) {
+            @unlink($tmp);
+            gos_lyre_fail('write_failed', 500, ['status' => 'failed']);
+        }
+        @unlink($tmp);
         $duration = $data['video']['duration'] ?? $data['duration'] ?? ($job['duration'] ?? 6);
-        $next = [
-            'request_id' => $requestId,
-            'kind' => 'video',
+        $job = gos_lyre_job_patch($requestId, [
+            'kind' => $kind !== '' ? $kind : 'video',
             'status' => 'done',
             'key' => $key,
             'duration' => $duration,
-            'created_at' => $job['created_at'] ?? time(),
-        ];
-        gos_lyre_job_write($requestId, $next);
-        gos_api_json([
-            'ok' => true,
-            'status' => 'done',
-            'request_id' => $requestId,
-            'key' => $key,
-            'src' => 'me:' . $key,
-            'duration' => $duration,
-            'kind' => 'video',
         ]);
+
+        return gos_lyre_imagine_status_payload($requestId, $job);
     }
     if ($st === 'failed' || $st === 'expired' || $st === 'error') {
-        gos_api_json(['ok' => false, 'status' => $st, 'error' => (string) ($data['error'] ?? $st)], 502);
+        gos_lyre_fail((string) ($data['error'] ?? $st), 502, ['status' => $st]);
     }
-    gos_api_json(['ok' => true, 'status' => 'pending', 'request_id' => $requestId, 'kind' => 'video']);
+    $pending = array_merge($job, [
+        'kind' => $kind !== '' ? $kind : 'video',
+        'status' => 'pending',
+        'request_id' => $requestId,
+    ]);
+
+    return gos_lyre_imagine_status_payload($requestId, $pending);
 }
 
 require_once dirname(__DIR__) . '/includes/lyre_director.php';
@@ -1676,7 +2013,10 @@ try {
             gos_lyre_http_mcp_status($access);
         }
         if ($action === 'imagine_status') {
-            gos_lyre_get_imagine_status((string) ($_GET['request_id'] ?? $_GET['id'] ?? ''));
+            gos_lyre_http_send(fn () => gos_lyre_imagine_status($access, [
+                'request_id' => (string) ($_GET['request_id'] ?? $_GET['id'] ?? ''),
+                'attach' => false,
+            ]));
         }
         gos_api_json(['ok' => false, 'error' => 'unknown_action'], 404);
     }
@@ -1745,10 +2085,13 @@ try {
         gos_lyre_storage_put_json($body);
     }
     if ($action === 'imagine_still') {
-        gos_lyre_post_imagine_still($body);
+        gos_lyre_http_send(fn () => gos_lyre_imagine_still($access, $body));
     }
     if ($action === 'imagine_video') {
-        gos_lyre_post_imagine_video($body);
+        gos_lyre_http_send(fn () => gos_lyre_imagine_video($access, $body));
+    }
+    if ($action === 'imagine_attach') {
+        gos_lyre_http_send(fn () => gos_lyre_imagine_attach($access, $body));
     }
     gos_api_json(['ok' => false, 'error' => 'unknown_action'], 400);
 } catch (GosLyreException $e) {

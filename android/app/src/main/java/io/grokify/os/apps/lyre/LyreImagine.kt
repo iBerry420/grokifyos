@@ -80,16 +80,19 @@ object LyreImagine {
         source: File?,
         refs: List<File>,
         aspect: String = "16:9",
+        boardId: String? = null,
     ): JSONObject {
         val images = JSONArray()
         source?.let { encodeImage(it)?.let { img -> images.put(img) } }
         for (ref in capRefs(refs)) {
             encodeImage(ref)?.let { images.put(it) }
         }
-        return JSONObject()
+        val body = JSONObject()
             .put("prompt", tagPrompt(prompt, images.length(), 0))
             .put("aspect_ratio", aspect)
             .put("images", images)
+        if (!boardId.isNullOrBlank()) body.put("board_id", boardId)
+        return body
     }
 
     fun videoBody(
@@ -102,6 +105,9 @@ object LyreImagine {
         resolution: String,
         mode: String,
         videoKey: String? = null,
+        boardId: String? = null,
+        frameId: String? = null,
+        clipId: String? = null,
     ): JSONObject {
         val images = JSONArray()
         sourceStill?.let { encodeImage(it)?.let { img -> images.put(img) } }
@@ -119,6 +125,9 @@ object LyreImagine {
             .put("images", images)
             .put("voice_ids", JSONArray(voiceIds))
         if (!videoKey.isNullOrBlank()) body.put("video_key", videoKey)
+        if (!boardId.isNullOrBlank()) body.put("board_id", boardId)
+        if (!frameId.isNullOrBlank()) body.put("frame_id", frameId)
+        if (!clipId.isNullOrBlank()) body.put("clip_id", clipId)
         return body
     }
 
@@ -150,8 +159,15 @@ class LyreImagineClient(
         .build()
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
 
-    fun generateStill(prompt: String, source: File?, refs: List<File>, aspect: String): JSONObject {
-        val php = api.imagineStill(LyreImagine.stillBody(prompt, source, refs, aspect))
+    fun generateStill(
+        prompt: String,
+        source: File?,
+        refs: List<File>,
+        aspect: String,
+        boardId: String = "",
+        isOdysseus: Boolean = true,
+    ): JSONObject {
+        val php = api.imagineStill(LyreImagine.stillBody(prompt, source, refs, aspect, boardId))
         if (php.optBoolean("ok") && php.optString("key").isNotBlank()) return php
         if (xaiKey.isNullOrBlank()) return php.takeIf { it.has("error") } ?: JSONObject().put("ok", false).put("error", "spacexai_key_missing")
         val uris = ArrayList<String>()
@@ -175,10 +191,11 @@ class LyreImagineClient(
         val res = xaiJson("POST", url, payload)
         if (!res.optBoolean("ok")) return res
         val bytes = imageBytes(res) ?: return JSONObject().put("ok", false).put("error", "empty_image")
-        val key = "stills/${LyreEdits.newId("st")}.jpg"
+        val meKey = LyreStorageKeys.writeKey(boardId, isOdysseus, "stills", LyreEdits.newId("st"), "jpg")
+        val key = LyreStorageKeys.normalize(meKey) ?: meKey.removePrefix("me:")
         val put = api.putStorage(key, bytes, "image/jpeg")
         if (!put.optBoolean("ok")) return put
-        return JSONObject().put("ok", true).put("status", "done").put("key", key).put("src", "me:$key")
+        return JSONObject().put("ok", true).put("status", "done").put("key", key).put("src", meKey)
     }
 
     fun startVideo(
@@ -192,9 +209,25 @@ class LyreImagineClient(
         mode: String,
         videoKey: String?,
         videoFile: File?,
+        boardId: String = "",
+        frameId: String? = null,
+        clipId: String? = null,
     ): JSONObject {
         val php = api.imagineVideo(
-            LyreImagine.videoBody(prompt, sourceStill, refs, voices, duration, aspect, resolution, mode, videoKey),
+            LyreImagine.videoBody(
+                prompt,
+                sourceStill,
+                refs,
+                voices,
+                duration,
+                aspect,
+                resolution,
+                mode,
+                videoKey,
+                boardId,
+                frameId,
+                clipId,
+            ),
         )
         if (php.optBoolean("ok") && (php.optString("request_id").isNotBlank() || php.optString("key").isNotBlank())) {
             return php
@@ -241,7 +274,7 @@ class LyreImagineClient(
         return xaiJson("POST", "https://api.x.ai/v1/videos/generations", payload)
     }
 
-    fun pollVideo(requestId: String): JSONObject {
+    fun pollVideo(requestId: String, boardId: String = "", isOdysseus: Boolean = true): JSONObject {
         val php = api.imagineStatus(requestId)
         if (php.optBoolean("ok") && (php.optString("status") == "done" || php.optString("key").isNotBlank())) {
             return php
@@ -253,7 +286,8 @@ class LyreImagineClient(
         if (status == "done" || status == "completed" || status == "succeeded") {
             val url = res.optJSONObject("video")?.optString("url").orEmpty().ifBlank { res.optString("url") }
             val bytes = download(url) ?: return JSONObject().put("ok", false).put("error", "empty_video")
-            val key = "videos/${LyreEdits.newId("vid")}.mp4"
+            val meKey = LyreStorageKeys.writeKey(boardId, isOdysseus, "videos", LyreEdits.newId("vid"), "mp4")
+            val key = LyreStorageKeys.normalize(meKey) ?: meKey.removePrefix("me:")
             val put = api.putStorage(key, bytes, "video/mp4")
             if (!put.optBoolean("ok")) return put
             val dur = res.optJSONObject("video")?.optDouble("duration") ?: res.optDouble("duration", 6.0)
@@ -261,7 +295,7 @@ class LyreImagineClient(
                 .put("ok", true)
                 .put("status", "done")
                 .put("key", key)
-                .put("src", "me:$key")
+                .put("src", meKey)
                 .put("duration", dur)
         }
         if (status == "failed" || status == "expired" || status == "error") {
