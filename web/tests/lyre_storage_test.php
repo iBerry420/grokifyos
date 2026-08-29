@@ -117,6 +117,17 @@ expect_eq(gos_lyre_job_kind(['kind' => 'stitch', 'key' => null, 'movie_key' => '
 expect_eq(gos_lyre_job_kind(['kind' => 'video', 'key' => 'videos/vid_a.mp4']), 'video', 'job kind video');
 expect_eq(gos_lyre_job_kind(['movie_key' => 'boards/x/movie.mp4']), 'stitch', 'job kind from movie_key');
 expect_eq(gos_lyre_job_kind([]), 'video', 'job kind default video');
+$phoneVidKey = gos_lyre_imagine_video_key(['board_id' => 'lyre_phone_abc']);
+expect_true(is_string($phoneVidKey) && str_starts_with((string) $phoneVidKey, 'boards/lyre_phone_abc/videos/vid_'), 'status video key uses board prefix');
+$odVidKey = gos_lyre_imagine_video_key(['board_id' => 'lyre']);
+expect_true(is_string($odVidKey) && str_starts_with((string) $odVidKey, 'videos/vid_'), 'odysseus status video key is root');
+$emptyVidKey = gos_lyre_imagine_video_key([]);
+expect_true(is_string($emptyVidKey) && str_starts_with((string) $emptyVidKey, 'videos/vid_'), 'empty board_id video key is root');
+$cf = tempnam(sys_get_temp_dir(), 'lyre-cf');
+file_put_contents((string) $cf, 'x');
+expect_eq(gos_lyre_commit_file('etc/passwd', (string) $cf), false, 'commit_file rejects unknown prefix');
+expect_eq(gos_lyre_commit_file('../secret.mp4', (string) $cf), false, 'commit_file rejects traversal');
+@unlink((string) $cf);
 
 if ($fails > 0) {
     fwrite(STDERR, "{$fails} failed\n");

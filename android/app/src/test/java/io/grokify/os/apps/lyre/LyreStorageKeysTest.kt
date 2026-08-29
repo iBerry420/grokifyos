@@ -66,6 +66,14 @@ class LyreStorageKeysTest {
     }
 
     @Test
+    fun odysseusNamespaceFromBoardId() {
+        assertEquals(true, LyreStorageKeys.odysseusNamespace(""))
+        assertEquals(true, LyreStorageKeys.odysseusNamespace("lyre"))
+        assertEquals(true, LyreStorageKeys.odysseusNamespace("Lyre"))
+        assertEquals(false, LyreStorageKeys.odysseusNamespace("lyre_phone_abc"))
+    }
+
+    @Test
     fun writeKeyRootsOdysseusAndPrefixesNewProjects() {
         assertEquals(
             "me:stills/st_a.jpg",

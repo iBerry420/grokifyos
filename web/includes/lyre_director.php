@@ -1836,6 +1836,32 @@ function gos_lyre_attach_generated_video(
     return gos_lyre_finish_picture_edit($board, $withScenes);
 }
 
+function gos_lyre_add_video_to_library(array $board, string $src, string $name, float $durationSec): array
+{
+    $videos = gos_lyre_arr($board['libraryVideo'] ?? []);
+    foreach ($videos as $item) {
+        if (!is_array($item)) {
+            continue;
+        }
+        if (!empty($item['deletedAt'])) {
+            continue;
+        }
+        if (gos_lyre_src_equal(gos_lyre_str($item['src'] ?? ''), $src)) {
+            return $board;
+        }
+    }
+    $videos[] = [
+        'id' => gos_lyre_media_id('lv'),
+        'src' => $src,
+        'name' => $name !== '' ? $name : 'Video',
+        'durationSec' => max(GOS_LYRE_MIN_DUR, $durationSec),
+        'createdAt' => (int) round(microtime(true) * 1000),
+    ];
+    $board['libraryVideo'] = $videos;
+
+    return $board;
+}
+
 /**
  * @param array<string, mixed> $project
  * @param array<string, mixed> $board
@@ -2237,7 +2263,6 @@ function gos_lyre_director_activity_append(array $access, array $body): array
     ];
 }
 
-/** @return array<string, mixed> */
 /**
  * @return array{board: array<string, mixed>, folder_id: string, created: bool}
  */
@@ -2280,6 +2305,7 @@ function gos_lyre_ensure_ref_folder(array $board, string $path, string $folderId
     return ['board' => $board, 'folder_id' => $folderId, 'created' => $created];
 }
 
+/** @return array<string, mixed> */
 function gos_lyre_director_folder(array $access, array $body): array
 {
     $path = trim(str_replace('\\', '/', gos_lyre_str($body['path'] ?? $body['name'] ?? '')));
@@ -2922,15 +2948,19 @@ function gos_lyre_director_generate_video(array $access, array $body, string $mo
         $body['mode'] = 'edit';
         $clipId = trim(gos_lyre_str($body['clip_id'] ?? ''));
         $videoKey = trim(gos_lyre_str($body['video_key'] ?? ''));
+        if ($clipId === '' && $videoKey === '') {
+            gos_lyre_fail('video_required', 400);
+        }
         if ($clipId !== '' && $videoKey === '') {
             $clip = gos_lyre_find_video_clip($board, $clipId);
             if (is_array($clip)) {
                 $videoKey = gos_lyre_str($clip['src'] ?? '');
             }
         }
-        if ($videoKey !== '') {
-            $body['video_key'] = $videoKey;
+        if ($videoKey === '') {
+            gos_lyre_fail('video_required', 400);
         }
+        $body['video_key'] = $videoKey;
     } else {
         $body['mode'] = 'generate';
     }
@@ -2986,6 +3016,12 @@ function gos_lyre_imagine_attach(array $access, array $body): array
     if (trim(gos_lyre_str($body['board_id'] ?? '')) === '' && trim(gos_lyre_str($body['project_id'] ?? '')) === '') {
         gos_lyre_fail('project_required', 400);
     }
+    $row = gos_lyre_director_resolve($access, $body, true);
+    $resolvedBoard = gos_lyre_str($row['board_id'] ?? '');
+    $jobBoard = trim(gos_lyre_str($job['board_id'] ?? ''));
+    if ($jobBoard !== '' && $jobBoard !== $resolvedBoard) {
+        gos_lyre_fail('not_found', 404);
+    }
     if (!empty($job['attached_at'])) {
         return [
             'ok' => true,
@@ -3000,18 +3036,25 @@ function gos_lyre_imagine_attach(array $access, array $body): array
             'noop' => true,
         ];
     }
+    $loaded = gos_lyre_load_owned_board($access, $body, true);
+    if (!is_array(gos_lyre_find_frame($loaded['board'], $frameId))) {
+        gos_lyre_fail('not_found', 404);
+    }
     $duration = gos_lyre_num($job['duration'] ?? 6, 6.0);
     $name = gos_lyre_str($body['name'] ?? '');
     $out = gos_lyre_director_mutate($access, $body, function (array $board) use ($frameId, $src, $key, $duration, $name) {
         $frame = gos_lyre_find_frame($board, $frameId);
-        if (is_array($frame)) {
-            $have = gos_lyre_str($frame['videoSrc'] ?? '');
-            if ($have !== '' && (gos_lyre_src_equal($have, $src) || gos_lyre_src_equal($have, $key))) {
-                return $board;
-            }
+        if (!is_array($frame)) {
+            gos_lyre_fail('not_found', 404);
         }
+        $label = $name !== '' ? $name : gos_lyre_str($frame['caption'] ?? $frameId);
+        $have = gos_lyre_str($frame['videoSrc'] ?? '');
+        if ($have !== '' && (gos_lyre_src_equal($have, $src) || gos_lyre_src_equal($have, $key))) {
+            return gos_lyre_add_video_to_library($board, $src, $label, $duration);
+        }
+        $next = gos_lyre_attach_generated_video($board, $frameId, $src, $duration, $label);
 
-        return gos_lyre_attach_generated_video($board, $frameId, $src, $duration, $name);
+        return gos_lyre_add_video_to_library($next, $src, $label, $duration);
     }, [
         'type' => 'imagine',
         'summary' => 'Attached generated video',

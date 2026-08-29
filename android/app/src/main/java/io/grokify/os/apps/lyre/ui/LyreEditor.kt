@@ -995,15 +995,22 @@ fun LyreEditor(
                     LyreImagineMode.GEN_VIDEO -> {
                         val fid = job.frameId ?: return@withContext
                         val have = live.scenes.flatMap { it.frames }.firstOrNull { it.id == fid }?.videoSrc.orEmpty()
-                        if (have.isNotEmpty() && LyreStorageKeys.normalize(have) == LyreStorageKeys.normalize(src)) {
-                            return@withContext
+                        val already = have.isNotEmpty() &&
+                            LyreStorageKeys.normalize(have) == LyreStorageKeys.normalize(src)
+                        val inLibrary = live.libraryVideo.any {
+                            it.deletedAt == null && LyreStorageKeys.normalize(it.src) == LyreStorageKeys.normalize(src)
                         }
-                        LyreEdits.addVideoToLibrary(
-                            LyreEdits.attachGeneratedVideo(live, fid, src, duration),
-                            src,
-                            job.title,
-                            duration,
-                        )
+                        if (already) {
+                            if (inLibrary) return@withContext
+                            LyreEdits.addVideoToLibrary(live, src, job.title, duration)
+                        } else {
+                            LyreEdits.addVideoToLibrary(
+                                LyreEdits.attachGeneratedVideo(live, fid, src, duration),
+                                src,
+                                job.title,
+                                duration,
+                            )
+                        }
                     }
                     LyreImagineMode.EDIT_VIDEO -> {
                         val cid = job.clipId ?: return@withContext

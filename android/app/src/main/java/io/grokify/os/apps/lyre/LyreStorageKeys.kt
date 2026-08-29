@@ -73,6 +73,9 @@ object LyreStorageKeys {
 
     fun isStillFile(file: File): Boolean = file.extension.lowercase() in IMAGE_EXT
 
+    fun odysseusNamespace(boardId: String): Boolean =
+        boardId.isBlank() || boardId.equals("lyre", ignoreCase = true)
+
     /** Odysseus keeps root `me:stills|videos|audio/`. New projects write `me:boards/{boardId}/…`. */
     fun writeKey(boardId: String, isOdysseus: Boolean, kind: String, id: String, ext: String): String {
         val path = if (isOdysseus) "$kind/$id.$ext" else "boards/$boardId/$kind/$id.$ext"

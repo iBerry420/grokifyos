@@ -503,6 +503,74 @@ expect_eq($frAAfter['videoSrc'] ?? null, $frABefore['videoSrc'] ?? null, 'locked
 $lockJob = gos_lyre_job_read($lockId);
 expect_true(empty($lockJob['attached_at'] ?? null), 'locked attach does not set attached_at');
 
+$libHit = false;
+foreach (($boardAfterAtt['libraryVideo'] ?? []) as $lv) {
+    if (is_array($lv) && gos_lyre_src_equal((string) ($lv['src'] ?? ''), $vidKey)) {
+        $libHit = true;
+    }
+}
+expect_true($libHit, 'attach also adds libraryVideo');
+
+$err = catch_error(static fn () => gos_lyre_imagine_status($access, ['request_id' => 'req_no_such_job1']));
+expect_eq($err?->error, 'not_found', 'missing job status is not_found');
+expect_eq($err?->http, 404, 'missing job http 404');
+
+$failId = 'req_too_large_job1';
+gos_lyre_job_write($failId, [
+    'request_id' => $failId,
+    'kind' => 'video',
+    'status' => 'failed',
+    'error' => 'too_large',
+    'board_id' => $bid,
+]);
+$err = catch_error(static fn () => gos_lyre_imagine_status($access, ['request_id' => $failId]));
+expect_eq($err?->error, 'too_large', 'failed too_large job does not re-download');
+expect_eq($err?->http, 413, 'too_large http 413');
+
+$missFr = 'req_miss_frame_01';
+gos_lyre_job_write($missFr, [
+    'request_id' => $missFr,
+    'kind' => 'video',
+    'status' => 'done',
+    'key' => 'boards/lyre_phone_cas-1/videos/vid_orphan.mp4',
+    'frame_id' => 'fr_nope',
+    'attached_at' => null,
+    'board_id' => $bid,
+    'duration' => 2,
+]);
+$err = catch_error(static fn () => gos_lyre_imagine_attach($access, [
+    'request_id' => $missFr,
+    'board_id' => $bid,
+    'frame_id' => 'fr_nope',
+]));
+expect_eq($err?->error, 'not_found', 'attach missing frame 404');
+expect_true(empty((gos_lyre_job_read($missFr)['attached_at'] ?? null)), 'missing frame does not stamp attached_at');
+
+$misId = 'req_mismatch_brd01';
+gos_lyre_job_write($misId, [
+    'request_id' => $misId,
+    'kind' => 'video',
+    'status' => 'done',
+    'key' => $vidKey,
+    'frame_id' => 'fr_a',
+    'attached_at' => null,
+    'board_id' => $bid,
+    'duration' => 2,
+]);
+$err = catch_error(static fn () => gos_lyre_imagine_attach($access, [
+    'request_id' => $misId,
+    'board_id' => $bid2,
+    'frame_id' => 'fr_a',
+]));
+expect_eq($err?->error, 'not_found', 'attach rejects job board mismatch');
+expect_true(empty((gos_lyre_job_read($misId)['attached_at'] ?? null)), 'mismatch does not stamp attached_at');
+
+$err = catch_error(static fn () => gos_lyre_director_edit_video($access, [
+    'board_id' => $bid,
+    'prompt' => 'tweak the clip',
+]));
+expect_eq($err?->error, 'video_required', 'edit video without clip_id or video_key');
+
 function lyre_director_rmdir(string $dir): void
 {
     if (!is_dir($dir)) {

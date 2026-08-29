@@ -165,7 +165,7 @@ class LyreImagineClient(
         refs: List<File>,
         aspect: String,
         boardId: String = "",
-        isOdysseus: Boolean = true,
+        isOdysseus: Boolean = LyreStorageKeys.odysseusNamespace(boardId),
     ): JSONObject {
         val php = api.imagineStill(LyreImagine.stillBody(prompt, source, refs, aspect, boardId))
         if (php.optBoolean("ok") && php.optString("key").isNotBlank()) return php
@@ -274,7 +274,11 @@ class LyreImagineClient(
         return xaiJson("POST", "https://api.x.ai/v1/videos/generations", payload)
     }
 
-    fun pollVideo(requestId: String, boardId: String = "", isOdysseus: Boolean = true): JSONObject {
+    fun pollVideo(
+        requestId: String,
+        boardId: String = "",
+        isOdysseus: Boolean = LyreStorageKeys.odysseusNamespace(boardId),
+    ): JSONObject {
         val php = api.imagineStatus(requestId)
         if (php.optBoolean("ok") && (php.optString("status") == "done" || php.optString("key").isNotBlank())) {
             return php
@@ -354,12 +358,27 @@ class LyreImagineClient(
         }
     }
 
-    private fun download(url: String): ByteArray? {
+    private fun download(url: String, maxBytes: Long = 80L * 1024 * 1024): ByteArray? {
         if (url.isBlank()) return null
         return try {
             http.newCall(Request.Builder().url(url).build()).execute().use { resp ->
                 if (!resp.isSuccessful) return null
-                resp.body?.bytes()?.takeIf { it.isNotEmpty() }
+                val body = resp.body ?: return null
+                val declared = body.contentLength()
+                if (declared > maxBytes) return null
+                body.byteStream().use { input ->
+                    val out = java.io.ByteArrayOutputStream()
+                    val buf = ByteArray(8192)
+                    var total = 0
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n <= 0) break
+                        total += n
+                        if (total > maxBytes) return null
+                        out.write(buf, 0, n)
+                    }
+                    out.toByteArray().takeIf { it.isNotEmpty() }
+                }
             }
         } catch (_: Exception) {
             null
