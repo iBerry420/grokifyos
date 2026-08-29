@@ -31,6 +31,8 @@ const GOS_LYRE_MCP_TOOL_ALLOWLIST = [
     'lyre_move',
     'lyre_delete',
     'lyre_activity',
+    'lyre_stitch',
+    'lyre_pop',
 ];
 
 /** @var list<string> */
@@ -822,6 +824,10 @@ function gos_lyre_mcp_tool_definitions(): array
                     'frame_id' => ['type' => 'string'],
                     'start_sec' => ['type' => 'number'],
                     'end_sec' => ['type' => 'number'],
+                    'commit_trim' => [
+                        'type' => 'boolean',
+                        'description' => 'Rewrite the clip file with ffmpeg (default true for bots). Keep origSrc.',
+                    ],
                 ],
                 'required' => ['clip_id'],
                 'additionalProperties' => false,
@@ -870,6 +876,34 @@ function gos_lyre_mcp_tool_definitions(): array
                     'before_ts' => ['type' => 'integer'],
                     'text' => ['type' => 'string'],
                     'type' => ['type' => 'string'],
+                ],
+                'additionalProperties' => false,
+            ],
+        ],
+        [
+            'name' => 'lyre_stitch',
+            'description' => 'Stitch the next leftover clip onto the movie (drop last encoded frame). Requires board_id or project_id. Returns pending request_id; poll lyre_imagine_status. Odysseus refused.',
+            'inputSchema' => [
+                'type' => 'object',
+                'properties' => [
+                    'project_id' => ['type' => 'string'],
+                    'board_id' => ['type' => 'string'],
+                    'clip_id' => [
+                        'type' => 'string',
+                        'description' => 'Must be nextStitchTarget; omit to use the next leftover.',
+                    ],
+                ],
+                'additionalProperties' => false,
+            ],
+        ],
+        [
+            'name' => 'lyre_pop',
+            'description' => 'Un-stitch the last movie part (restore movie.g{n} or rebuild). Clips stay on the leftover track. Requires board_id or project_id. Odysseus refused.',
+            'inputSchema' => [
+                'type' => 'object',
+                'properties' => [
+                    'project_id' => ['type' => 'string'],
+                    'board_id' => ['type' => 'string'],
                 ],
                 'additionalProperties' => false,
             ],
@@ -946,9 +980,20 @@ function gos_lyre_mcp_dispatch_tool(string $name, array $args, array $access): a
 
             return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
         case 'lyre_imagine_status':
-            $out = gos_lyre_director_imagine_status($access, $args);
+            $rid = trim((string) ($args['request_id'] ?? ''));
+            $job = gos_lyre_job_read($rid);
+            $kind = is_array($job) ? gos_lyre_job_kind($job) : '';
+            $attach = !empty($args['attach']) && !in_array($kind, ['stitch', 'trim', 'pop'], true);
+            if ($attach) {
+                $out = gos_lyre_director_imagine_status($access, $args);
 
-            return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
+                return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
+            }
+            $out = gos_lyre_imagine_status_result($rid);
+            $body = $out['body'];
+            $isError = empty($body['ok']);
+
+            return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($body), $isError);
         case 'lyre_scene':
             $out = gos_lyre_director_scene($access, $args);
 
@@ -978,6 +1023,14 @@ function gos_lyre_mcp_dispatch_tool(string $name, array $args, array $access): a
             } else {
                 $out = gos_lyre_director_activity($access, $args);
             }
+
+            return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
+        case 'lyre_stitch':
+            $out = gos_lyre_director_stitch($access, $args);
+
+            return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
+        case 'lyre_pop':
+            $out = gos_lyre_director_pop($access, $args);
 
             return gos_lyre_mcp_text_result(gos_lyre_mcp_encode_payload($out));
         default:

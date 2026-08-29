@@ -2449,9 +2449,18 @@ function gos_lyre_director_trim(array $access, array $body): array
     }
     $start = gos_lyre_num($body['start_sec'] ?? $body['new_start_sec'] ?? 0);
     $end = gos_lyre_num($body['end_sec'] ?? $body['new_end_sec'] ?? ($start + GOS_LYRE_MIN_DUR));
+    $commit = $body['commit_trim'] ?? gos_lyre_is_mcp($access);
+    if (!is_bool($commit)) {
+        $commit = filter_var($commit, FILTER_VALIDATE_BOOLEAN);
+    }
 
-    return gos_lyre_director_mutate($access, $body, function (array $board) use ($clipId, $start, $end) {
-        return gos_lyre_apply_trim($board, $clipId, $start, $end);
+    $out = gos_lyre_director_mutate($access, $body, function (array $board) use ($clipId, $start, $end, $commit) {
+        $next = gos_lyre_apply_trim($board, $clipId, $start, $end);
+        if ($commit) {
+            $next = gos_lyre_cut_mark_orig_src($next, $clipId);
+        }
+
+        return $next;
     }, [
         'type' => 'trim',
         'clipId' => $clipId,
@@ -2459,6 +2468,16 @@ function gos_lyre_director_trim(array $access, array $body): array
         'summary' => 'Trim · ' . $clipId,
         'op' => 'trim',
     ]);
+    if ($commit) {
+        $job = gos_lyre_cut_enqueue_trim($access, $body, $out, $clipId);
+        if (is_array($job)) {
+            $out['status'] = 'pending';
+            $out['request_id'] = $job['request_id'] ?? '';
+            $out['kind'] = 'trim';
+        }
+    }
+
+    return $out;
 }
 
 /** @return array<string, mixed> */
@@ -3115,3 +3134,6 @@ function gos_lyre_director_imagine_status(array $access, array $body): array
 
     return array_merge($status, $att);
 }
+
+require_once __DIR__ . '/lyre_cut.php';
+

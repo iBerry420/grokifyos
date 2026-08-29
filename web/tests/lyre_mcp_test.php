@@ -329,11 +329,13 @@ expect_eq($names, [
     'lyre_move',
     'lyre_open',
     'lyre_place',
+    'lyre_pop',
     'lyre_projects',
     'lyre_scene',
     'lyre_snapshot',
+    'lyre_stitch',
     'lyre_trim',
-], 'PR 3 tool allowlist');
+], 'tool allowlist includes Imagine + stitch/pop');
 expect_true(!in_array('save_board', $names, true), 'save_board absent from tools/list');
 expect_true(in_array('lyre_snapshot', $names, true), 'snapshot tool listed');
 expect_true(in_array('lyre_activity', $names, true), 'activity tool listed');
@@ -363,6 +365,14 @@ $needAtt = gos_lyre_mcp_run_tool('lyre_imagine_status', ['request_id' => 'req_ne
 expect_true(str_contains((string) ($needAtt['content'][0]['text'] ?? ''), 'project_required'), 'imagine_status attach requires board_id');
 $needEditVid = gos_lyre_mcp_run_tool('lyre_edit_video', ['prompt' => 'tweak'], $access);
 expect_true(str_contains((string) ($needEditVid['content'][0]['text'] ?? ''), 'project_required'), 'edit_video without board_id');
+$stNeed = gos_lyre_mcp_run_tool('lyre_stitch', [], $access);
+expect_true(str_contains((string) ($stNeed['content'][0]['text'] ?? ''), 'project_required'), 'stitch requires board_id');
+$popNeed = gos_lyre_mcp_run_tool('lyre_pop', [], $access);
+expect_true(str_contains((string) ($popNeed['content'][0]['text'] ?? ''), 'project_required'), 'pop requires board_id');
+$stOd = gos_lyre_mcp_run_tool('lyre_stitch', ['board_id' => 'lyre'], $access);
+expect_true(str_contains((string) ($stOd['content'][0]['text'] ?? ''), 'odysseus_protected'), 'stitch Odysseus protected');
+$popOd = gos_lyre_mcp_run_tool('lyre_pop', ['board_id' => 'lyre'], $access);
+expect_true(str_contains((string) ($popOd['content'][0]['text'] ?? ''), 'odysseus_protected'), 'pop Odysseus protected');
 
 $bogus = gos_lyre_mcp_run_tool('not_a_tool', [], $access);
 expect_true(str_contains((string) ($bogus['content'][0]['text'] ?? ''), 'unknown_tool'), 'unknown tool name');

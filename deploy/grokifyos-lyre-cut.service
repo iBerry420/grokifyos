@@ -1,0 +1,23 @@
+[Unit]
+Description=GrokifyOS LYRE cut worker (stitch/trim/pop)
+After=network-online.target mysql.service mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/root/grokifyos
+EnvironmentFile=-/etc/grokifyos/php.env
+ExecStart=/usr/bin/php /root/grokifyos/scripts/lyre-cut-worker.php --loop
+Restart=always
+RestartSec=4
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=200
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=grokifyos-lyre-cut
+
+[Install]
+WantedBy=multi-user.target

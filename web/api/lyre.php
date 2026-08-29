@@ -1145,6 +1145,187 @@ function gos_lyre_mime_for_key(string $key): string
     };
 }
 
+function gos_lyre_ffmpeg_bin(): string
+{
+    foreach (['/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg'] as $bin) {
+        if (is_executable($bin)) {
+            return $bin;
+        }
+    }
+
+    return '';
+}
+
+function gos_lyre_ffprobe_bin(): string
+{
+    foreach (['/usr/bin/ffprobe', '/usr/local/bin/ffprobe'] as $bin) {
+        if (is_executable($bin)) {
+            return $bin;
+        }
+    }
+
+    return '';
+}
+
+function gos_lyre_php_cli_bin(): string
+{
+    return '/usr/bin/php';
+}
+
+/**
+ * @param list<string> $cmd
+ * @return array{code: int, stdout: string, stderr: string}
+ */
+function gos_lyre_proc_run(array $cmd, int $timeoutSec = 90): array
+{
+    if ($cmd === []) {
+        return ['code' => 1, 'stdout' => '', 'stderr' => 'no_cmd'];
+    }
+    $pipes = [];
+    $proc = @proc_open(
+        $cmd,
+        [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+        $pipes,
+        null,
+        null,
+        ['bypass_shell' => true]
+    );
+    if (!is_resource($proc)) {
+        return ['code' => 1, 'stdout' => '', 'stderr' => 'proc_open_failed'];
+    }
+    fclose($pipes[0]);
+    stream_set_blocking($pipes[1], false);
+    stream_set_blocking($pipes[2], false);
+    $stdout = '';
+    $stderr = '';
+    $deadline = microtime(true) + max(1, $timeoutSec);
+    $timedOut = false;
+    $drain = static function ($pipe, string &$into): void {
+        if (!is_resource($pipe)) {
+            return;
+        }
+        $chunk = fread($pipe, 8192);
+        if (is_string($chunk) && $chunk !== '') {
+            $into .= $chunk;
+            if (strlen($into) > 65536) {
+                $into = substr($into, -65536);
+            }
+        }
+    };
+    while (true) {
+        $status = proc_get_status($proc);
+        $read = [];
+        if (is_resource($pipes[1]) && !feof($pipes[1])) {
+            $read[] = $pipes[1];
+        }
+        if (is_resource($pipes[2]) && !feof($pipes[2])) {
+            $read[] = $pipes[2];
+        }
+        $left = $deadline - microtime(true);
+        if ($left <= 0) {
+            $timedOut = true;
+        } elseif ($read !== []) {
+            $write = null;
+            $except = null;
+            $sec = (int) floor($left);
+            $usec = (int) max(0, ($left - $sec) * 1000000);
+            $picked = $read;
+            @stream_select($picked, $write, $except, $sec, $usec);
+            if (is_array($picked)) {
+                foreach ($picked as $r) {
+                    if ($r === $pipes[1]) {
+                        $drain($pipes[1], $stdout);
+                    } else {
+                        $drain($pipes[2], $stderr);
+                    }
+                }
+            }
+        } else {
+            usleep(20000);
+        }
+        if ($timedOut) {
+            @proc_terminate($proc, SIGTERM);
+            usleep(200000);
+            $st = proc_get_status($proc);
+            if (!empty($st['running'])) {
+                @proc_terminate($proc, SIGKILL);
+            }
+            break;
+        }
+        if (empty($status['running'])) {
+            if (is_resource($pipes[1]) && !feof($pipes[1])) {
+                $rest = stream_get_contents($pipes[1]);
+                if (is_string($rest) && $rest !== '') {
+                    $stdout .= $rest;
+                }
+            }
+            if (is_resource($pipes[2]) && !feof($pipes[2])) {
+                $rest = stream_get_contents($pipes[2]);
+                if (is_string($rest) && $rest !== '') {
+                    $stderr .= $rest;
+                }
+            }
+            break;
+        }
+    }
+    if (is_resource($pipes[1])) {
+        fclose($pipes[1]);
+    }
+    if (is_resource($pipes[2])) {
+        fclose($pipes[2]);
+    }
+    $code = proc_close($proc);
+    if ($timedOut) {
+        $code = $code === 0 ? 124 : $code;
+        if (trim($stderr) === '') {
+            $stderr = 'timed out';
+        }
+    }
+
+    return ['code' => (int) $code, 'stdout' => $stdout, 'stderr' => $stderr];
+}
+
+function gos_lyre_copy_file(string $from, string $to): bool
+{
+    if ($from === '' || $to === '' || !is_file($from) || filesize($from) === false || filesize($from) <= 0) {
+        return false;
+    }
+    $dir = dirname($to);
+    if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
+        return false;
+    }
+    $tmp = $to . '.part.' . bin2hex(random_bytes(4));
+    $in = fopen($from, 'rb');
+    $out = fopen($tmp, 'wb');
+    if ($in === false || $out === false) {
+        if (is_resource($in)) {
+            fclose($in);
+        }
+        if (is_resource($out)) {
+            fclose($out);
+        }
+        @unlink($tmp);
+
+        return false;
+    }
+    $copied = stream_copy_to_stream($in, $out);
+    fclose($in);
+    fclose($out);
+    if ($copied === false || !is_file($tmp) || filesize($tmp) <= 0) {
+        @unlink($tmp);
+
+        return false;
+    }
+    if (!@rename($tmp, $to)) {
+        @unlink($tmp);
+
+        return false;
+    }
+
+    return is_file($to) && filesize($to) > 0;
+}
+
+
 function gos_lyre_storage_write_key(string $key, string $bytes): ?string
 {
     $root = gos_lyre_files_root();
@@ -1198,8 +1379,12 @@ function gos_lyre_grokme_put(string $key, string $bytes, string $mime): bool
     return $status >= 200 && $status < 300;
 }
 
-function gos_lyre_grokme_put_file(string $key, string $path, string $mime): bool
+function gos_lyre_grokme_put_file(string $key, string $path, ?string $mime = null): bool
 {
+    if (function_exists('gos_lyre_test_store_enabled') && gos_lyre_test_store_enabled()) {
+        return false;
+    }
+    $mime = $mime ?? gos_lyre_mime_for_key($key);
     $base = rtrim((string) (gos_env('GROKIFY_LYRE_ME_STORAGE_BASE', 'https://me.grokpot.io/v1/storage') ?? ''), '/');
     $apiKey = (string) (gos_env('GROKIFY_LYRE_ME_API_KEY', '') ?? '');
     if ($base === '' || $apiKey === '' || $key === '' || !is_file($path) || !function_exists('curl_init')) {
@@ -1293,6 +1478,104 @@ function gos_lyre_commit_file(string $key, string $path): bool
     gos_lyre_grokme_put_file($norm, $wrote, gos_lyre_mime_for_key($norm));
     return true;
 }
+
+function gos_lyre_ensure_local_file(string $key): ?string
+{
+    $norm = gos_lyre_storage_key($key);
+    if ($norm === null) {
+        return null;
+    }
+    $local = gos_lyre_local_object_path($norm);
+    if ($local !== null) {
+        return $local;
+    }
+    $root = gos_lyre_files_root();
+    if ($root === null) {
+        return null;
+    }
+    $dest = $root . '/' . $norm;
+    $prefix = $root . DIRECTORY_SEPARATOR;
+    $dir = dirname($dest);
+    if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
+        return null;
+    }
+    $base = rtrim((string) (gos_env('GROKIFY_LYRE_ME_STORAGE_BASE', 'https://me.grokpot.io/v1/storage') ?? ''), '/');
+    $apiKey = (string) (gos_env('GROKIFY_LYRE_ME_API_KEY', '') ?? '');
+    if ($base === '' || $apiKey === '' || !function_exists('curl_init')) {
+        return null;
+    }
+    $url = $base . '/' . implode('/', array_map('rawurlencode', explode('/', $norm)));
+    $tmp = $dest . '.part.' . bin2hex(random_bytes(4));
+    $fh = fopen($tmp, 'wb');
+    if ($fh === false) {
+        return null;
+    }
+    $ch = curl_init($url);
+    if ($ch === false) {
+        fclose($fh);
+        @unlink($tmp);
+
+        return null;
+    }
+    $status = 0;
+    curl_setopt_array($ch, [
+        CURLOPT_HTTPGET => true,
+        CURLOPT_FILE => $fh,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_CONNECTTIMEOUT => 30,
+        CURLOPT_TIMEOUT => 300,
+        CURLOPT_HTTPHEADER => [
+            'Authorization: Bearer ' . $apiKey,
+            'Accept: */*',
+        ],
+        CURLOPT_HEADERFUNCTION => static function ($ch, string $header) use (&$status): int {
+            if (preg_match('#^HTTP/\S+\s+(\d+)#', $header, $m) === 1) {
+                $status = (int) $m[1];
+            }
+
+            return strlen($header);
+        },
+    ]);
+    $ok = curl_exec($ch);
+    $errno = curl_errno($ch);
+    if ($status === 0) {
+        $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    }
+    curl_close($ch);
+    fclose($fh);
+    if ($ok === false || $errno !== 0 || $status === 404 || $status < 200 || $status >= 300) {
+        @unlink($tmp);
+
+        return null;
+    }
+    if (!is_file($tmp) || filesize($tmp) <= 0) {
+        @unlink($tmp);
+
+        return null;
+    }
+    if (!@rename($tmp, $dest)) {
+        @unlink($tmp);
+
+        return null;
+    }
+    $real = realpath($dest);
+    if (!is_string($real) || (!str_starts_with($real, $prefix) && $real !== $root)) {
+        @unlink($dest);
+
+        return null;
+    }
+    if (filesize($real) <= 0) {
+        return null;
+    }
+
+    return $real;
+}
+
+/**
+ * @param list<mixed> $raw
+ * @return list<string>
+ */
+
 
 /**
  * Stream $url onto $dest. Aborts if the body exceeds $maxBytes (80MB Imagine cap).
@@ -1998,7 +2281,7 @@ function gos_lyre_imagine_status(array $access, array $body): array
     $kind = gos_lyre_job_kind($job);
     $status = strtolower(trim((string) ($job['status'] ?? '')));
     if (in_array($kind, ['stitch', 'trim', 'pop'], true)) {
-        return gos_lyre_imagine_status_payload($requestId, $job);
+        return gos_lyre_cut_status_payload($job);
     }
     if ($kind === 'image' || $kind === 'still') {
         return gos_lyre_imagine_status_payload($requestId, $job);
@@ -2082,6 +2365,31 @@ function gos_lyre_imagine_status(array $access, array $body): array
     return gos_lyre_imagine_status_payload($requestId, $pending);
 }
 
+
+/**
+ * Poll Imagine or cut job status. Never runs ffmpeg. attach is ignored (GET poll).
+ *
+ * @return array{http: int, body: array<string, mixed>}
+ */
+function gos_lyre_imagine_status_result(string $requestId): array
+{
+    if (!gos_lyre_job_id_ok($requestId)) {
+        return ['http' => 400, 'body' => ['ok' => false, 'error' => 'request_id_required']];
+    }
+    $job = gos_lyre_job_read($requestId);
+    $kind = is_array($job) ? gos_lyre_job_kind($job) : '';
+    if (is_array($job) && in_array($kind, ['stitch', 'trim', 'pop'], true)) {
+        return ['http' => 200, 'body' => gos_lyre_cut_status_payload($job)];
+    }
+    try {
+        $body = gos_lyre_imagine_status([], ['request_id' => $requestId, 'attach' => false]);
+
+        return ['http' => 200, 'body' => $body];
+    } catch (GosLyreException $e) {
+        return ['http' => $e->http, 'body' => $e->toHttpBody()];
+    }
+}
+
 require_once dirname(__DIR__) . '/includes/lyre_director.php';
 require_once dirname(__DIR__) . '/includes/lyre_mcp.php';
 
@@ -2144,7 +2452,7 @@ try {
         if ($action === 'mcp_status') {
             gos_lyre_http_mcp_status($access);
         }
-        if ($action === 'imagine_status') {
+        if ($action === 'imagine_status' || $action === 'job_status') {
             gos_lyre_http_send(fn () => gos_lyre_imagine_status($access, [
                 'request_id' => (string) ($_GET['request_id'] ?? $_GET['id'] ?? ''),
                 'attach' => false,
@@ -2185,6 +2493,12 @@ try {
     }
     if ($action === 'trim') {
         gos_lyre_http_send(fn () => gos_lyre_director_trim($access, $body));
+    }
+    if ($action === 'stitch') {
+        gos_lyre_http_send(fn () => gos_lyre_director_stitch($access, $body));
+    }
+    if ($action === 'pop') {
+        gos_lyre_http_send(fn () => gos_lyre_director_pop($access, $body));
     }
     if ($action === 'move') {
         gos_lyre_http_send(fn () => gos_lyre_director_move($access, $body));
