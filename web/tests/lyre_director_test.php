@@ -571,6 +571,31 @@ $err = catch_error(static fn () => gos_lyre_director_edit_video($access, [
 ]));
 expect_eq($err?->error, 'video_required', 'edit video without clip_id or video_key');
 
+$lockWaitId = 'req_lock_pending01';
+gos_lyre_job_write($lockWaitId, [
+    'request_id' => $lockWaitId,
+    'kind' => 'video',
+    'status' => 'pending',
+    'board_id' => $bid,
+]);
+$held = gos_lyre_job_lock($lockWaitId, 1, true);
+$timed = gos_lyre_job_lock($lockWaitId, 0, false);
+expect_eq($timed, null, 'job lock fail=false returns null');
+$err = catch_error(static fn () => gos_lyre_job_lock($lockWaitId, 0, true));
+expect_eq($err?->error, 'lock_timeout', 'job lock fail=true still lock_timeout');
+$still = gos_lyre_job_read($lockWaitId);
+expect_eq($still['status'] ?? null, 'pending', 'lock_timeout does not persist failed');
+putenv('GOS_LYRE_JOB_LOCK_SEC=0');
+$_ENV['GOS_LYRE_JOB_LOCK_SEC'] = '0';
+$pendLock = gos_lyre_with_job_lock($lockWaitId, static function () {
+    return ['ok' => true, 'status' => 'inside'];
+}, gos_lyre_job_lock_timeout_sec(), false);
+expect_eq($pendLock, null, 'with_job_lock timeout returns null not 409');
+putenv('GOS_LYRE_JOB_LOCK_SEC');
+unset($_ENV['GOS_LYRE_JOB_LOCK_SEC']);
+expect_eq(gos_lyre_job_lock_timeout_sec(), 200, 'job lock default waits 200s');
+gos_lyre_job_unlock($held);
+
 function lyre_director_rmdir(string $dir): void
 {
     if (!is_dir($dir)) {

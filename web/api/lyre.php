@@ -1026,8 +1026,20 @@ function gos_lyre_job_lock_path(string $id): string
     return gos_lyre_jobs_dir() . '/' . $id . '.lock';
 }
 
-/** @return resource */
-function gos_lyre_job_lock(string $id, int $timeoutSec = 60)
+function gos_lyre_job_lock_timeout_sec(): int
+{
+    $v = getenv('GOS_LYRE_JOB_LOCK_SEC');
+    if (is_string($v) && $v !== '' && is_numeric($v)) {
+        return max(0, (int) $v);
+    }
+
+    return 200;
+}
+
+/**
+ * @return resource|null
+ */
+function gos_lyre_job_lock(string $id, int $timeoutSec = 200, bool $fail = true)
 {
     if (!gos_lyre_job_id_ok($id)) {
         gos_lyre_fail('request_id_required', 400);
@@ -1035,13 +1047,21 @@ function gos_lyre_job_lock(string $id, int $timeoutSec = 60)
     $path = gos_lyre_job_lock_path($id);
     $fh = fopen($path, 'c+');
     if ($fh === false) {
-        gos_lyre_fail('lock_timeout', 409);
+        if ($fail) {
+            gos_lyre_fail('lock_timeout', 409);
+        }
+
+        return null;
     }
     $deadline = microtime(true) + $timeoutSec;
     while (!flock($fh, LOCK_EX | LOCK_NB)) {
         if (microtime(true) >= $deadline) {
             fclose($fh);
-            gos_lyre_fail('lock_timeout', 409);
+            if ($fail) {
+                gos_lyre_fail('lock_timeout', 409);
+            }
+
+            return null;
         }
         usleep(50000);
     }
@@ -1064,9 +1084,12 @@ function gos_lyre_job_unlock($fh): void
  * @param callable(): T $fn
  * @return T
  */
-function gos_lyre_with_job_lock(string $id, callable $fn)
+function gos_lyre_with_job_lock(string $id, callable $fn, int $timeoutSec = 200, bool $fail = true)
 {
-    $fh = gos_lyre_job_lock($id);
+    $fh = gos_lyre_job_lock($id, $timeoutSec, $fail);
+    if ($fh === null) {
+        return null;
+    }
     try {
         return $fn();
     } finally {
@@ -1930,13 +1953,6 @@ function gos_lyre_imagine_status_payload(string $requestId, array $job): array
 }
 
 /**
- * Read-only of the board: may poll xAI and persist job JSON + object bytes. Never attaches.
- *
- * @param array<string, mixed> $access
- * @param array<string, mixed> $body
- * @return array<string, mixed>
- */
-/**
  * Object key for a finished Imagine video: rebuild from job board_id, never default unknown jobs to root.
  *
  * @param array<string, mixed> $job
@@ -1961,6 +1977,13 @@ function gos_lyre_imagine_status_fail_job(string $requestId, string $error, int 
     gos_lyre_fail($error, $http, ['status' => $status]);
 }
 
+/**
+ * Read-only of the board: may poll xAI and persist job JSON + object bytes. Never attaches.
+ *
+ * @param array<string, mixed> $access
+ * @param array<string, mixed> $body
+ * @return array<string, mixed>
+ */
 function gos_lyre_imagine_status(array $access, array $body): array
 {
     unset($access);
@@ -1995,7 +2018,7 @@ function gos_lyre_imagine_status(array $access, array $body): array
     $data = is_array($res['data']) ? $res['data'] : [];
     $st = strtolower((string) ($data['status'] ?? 'pending'));
     if ($st === 'done' || $st === 'completed' || $st === 'succeeded') {
-        return gos_lyre_with_job_lock($requestId, static function () use ($requestId, $kind, $data) {
+        $locked = gos_lyre_with_job_lock($requestId, static function () use ($requestId, $kind, $data) {
             $job = gos_lyre_job_read($requestId) ?? [];
             $now = strtolower(trim((string) ($job['status'] ?? '')));
             if ($now === 'done' && !empty($job['key'])) {
@@ -2035,7 +2058,16 @@ function gos_lyre_imagine_status(array $access, array $body): array
             ]);
 
             return gos_lyre_imagine_status_payload($requestId, $job);
-        });
+        }, gos_lyre_job_lock_timeout_sec(), false);
+        if ($locked === null) {
+            return gos_lyre_imagine_status_payload($requestId, array_merge($job, [
+                'kind' => $kind !== '' ? $kind : 'video',
+                'status' => 'pending',
+                'request_id' => $requestId,
+            ]));
+        }
+
+        return $locked;
     }
     if ($st === 'failed' || $st === 'expired' || $st === 'error') {
         $err = (string) ($data['error'] ?? $st);
